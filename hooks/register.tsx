@@ -528,9 +528,9 @@ export const register: Register = on => {
     let card = null
     if (open) {
       const mine = familyOf(s.lastModel)
-      const state = view.mode === 'cold' ? `COLD · idle ${fmtDuration(view.idleMs)} · the next message rewrites ${short(view.tokens)} tokens`
-        : view.mode === 'none' ? (s.compacted ? 'rebuilt by the next message after the compaction' : 'no request yet')
-        : `WARM · idle ${fmtDuration(view.idleMs)} · ${short(view.tokens)} tokens cached · ${fmtDuration(view.leftMs)} left`
+      // The row above already says warm or cold, the time left and the price; the card adds the size and the
+      // other models. Without a cache yet, it says why.
+      const pending = view.mode === 'none' ? (s.compacted ? 'the cache is rebuilt by the next message after the compaction' : 'no request yet') : null
       const prices = view.tokens > 0 ? CARD_MODELS.map(([name, id]) => {
         const p = priceOf(id, view.tokens)
         if (!p) return null
@@ -550,8 +550,8 @@ export const register: Register = on => {
       const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
       card = (
         <Box key="card" flexDirection="column" paddingX={1} paddingBottom={1}>
-          <Text size={SIZE} color={hue} bold>{state}</Text>
-          {prices.length ? <Box flexDirection="row" flexWrap="wrap"><Text size={SIZE} color={MUTED}>Next message  </Text>{prices}</Box> : null}
+          {pending ? <Text size={SIZE} color={MUTED}>{pending}</Text> : null}
+          {prices.length ? <Box flexDirection="row" flexWrap="wrap"><Text size={SIZE} color={MUTED}>Next message · {short(view.tokens)} tokens  </Text>{prices}</Box> : null}
           <Box flexDirection="row" alignItems="center" flexWrap="wrap">
             <Text size={SIZE} color={s.deadline ? GREEN : MUTED}>♨ {keep}  </Text>
             {s.deadline
