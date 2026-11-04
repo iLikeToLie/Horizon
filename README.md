@@ -1,15 +1,15 @@
 # Horizon
 
-One band above the Claude Code prompt that combines three mods. The look is Ribbon's: a warm dark strip, dot bars, and a WARM/COLD chip. The figures are Token Weather Usage's. The prompt-cache guard and keepwarm come from Cache Tax. It also adds a handoff note, written while the cache is still cheap to read. The terminal and the desktop app get the same features.
+One band above the Claude Code prompt that combines three mods. The look is Ribbon's: a warm dark strip and a WARM/COLD chip, in compact text on the desktop. The figures are Token Weather Usage's. The prompt-cache guard and keepwarm come from Cache Tax. It also adds a handoff note, written while the cache is still cheap to read. The terminal and the desktop app get the same features.
 
-![Horizon in the desktop app, warm, card open](assets/horizon-desktop-warm.png)
+![Horizon in the desktop app, card open](assets/horizon-desktop-open.png)
 
-![Horizon in the terminal, cold, with a handoff note ready](assets/horizon-terminal-cold.png)
+![Horizon in the terminal, folded](assets/horizon-terminal-folded.png)
 
 In the terminal, one row:
 
 ```
-☂ 200k 20% ▂▅▃█ ▲+6.3k   5H ●●●●●●···· 62% left · 2h00   7D ●●●●●●●●·· 80% left · 4d0h   [ WARM ] 42m left · next $0.05 ♨ 5h12   ≈$41.07 (+$0.58 · +1.5pt 5h)   ⚙ 2 running · 7   [ Show ]
+☀ 129k 13% ▂▅▃█ ▲+8k   5H ━━━━╍╍╍─── 72% · 2h30 ⚠ out in 58m   7D ━━━╍╍───── 41% · 3d0h → 72% at reset   [ WARM ] 42m left · next $0.05 ♨ 5h12   ≈$41.07 (+$0.58 · +1.5pt 5h)   ⚙ 2 running · 7   [ Show ]
 ```
 
 ## Install
@@ -25,7 +25,7 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 ## What the band shows
 
 - **Context:** the tokens in context, with a weather icon for how full the window is (☀ ☁ ☂ ☇ ↯). Then the share of the window, one bar per recent prompt, and the last prompt's change.
-- **5H / 7D:** how much of each window is **left**, as dots, and when it resets. `LOW` appears under 15%. `+N ahead` means you are using it faster than time is passing. `⚠ out Sun night` means the 7-day limit will run out before it resets at this week's pace.
+- **5H / 7D:** Token Weather Usage's bar. It is solid up to the share **used**; the gap to the time elapsed is dashed, in the bar's color when you are using faster than time passes and grey when you have margin. Green means behind the clock, amber ahead of it, red well ahead (15 points) or past 90% used. Then the time to reset, and where the pace so far ends up: `→ 72% at reset`, or `⚠ out in 58m` / `⚠ out Sun night` when it would run out before the reset.
 - **Cache:** `WARM` with the time left and what the next message costs. Under 10 minutes it turns yellow and shows what is at stake. `COLD` appears once the 1-hour warm period is over, with how long you have been idle and the price of rewriting the cache. `♨` shows a keepwarm window and `✎ note` shows a handoff note is ready.
 - **Cost:** the session cost, what the last prompt added, and the 5-hour points it used. On a subscription these are API-price equivalents, not a bill.
 - **Agents:** the subagents running now and how many have run in total.
@@ -33,7 +33,7 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 **Show / Hide** (hotkey `w`) opens a card with:
 
 - the cache state
-- the warm and cold price of the next message on each model, with yours marked `YOU`
+- the warm and cold price of the next message on Opus, Sonnet and Haiku, with yours marked `YOU`
 - keepwarm, with a **Keep warm 6h** / **Stop keepwarm** button (`k`)
 - the handoff note, with a **Clear and continue** button (`h`)
 - the guard mode and the cold writes paid this session

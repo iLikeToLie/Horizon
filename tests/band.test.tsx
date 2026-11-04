@@ -50,7 +50,7 @@ const cmd = (command: string, args: string): CommandRunInput => ({ command, args
 
 const textOf = (node: unknown) => JSON.stringify(node)
 
-test('a warm cache: weather, dot bars of what is left, the WARM chip and its time left', async ($, on) => {
+test('a warm cache: weather, pace-colored usage bars, the WARM chip and its time left', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   world(on)
   await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
@@ -59,8 +59,11 @@ test('a warm cache: weather, dot bars of what is left, the WARM chip and its tim
   const band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   const all = textOf(await band.find({ key: 'row' }))
   expect(all).toContain('200k')
-  expect(all).toContain('62% left')
-  expect(all).toContain('80% left')
+  // 5H: 38% used with 3h18 of 5 hours gone (66%): green, solid to 38%, the margin dashed grey; on pace for 58% at reset.
+  expect(all).toContain('38%')
+  expect(all).toContain('━━━━')
+  expect(all).toContain('→ 58% at reset')
+  expect(all).toContain('20%')
   expect(all).toContain(' WARM ')
   expect(all).toContain('42m left')
   // Warm starts folded.

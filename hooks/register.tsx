@@ -6,8 +6,8 @@ import {
   AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd,
 } from './keepwarm'
 import type { State } from './keepwarm'
-import { forecastFor, gaugeOf, lastReading, measureTurn, pushReading, refreshAgents, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
-import type { Gauge } from './weather'
+import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, refreshAgents, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
+import type { Cell, Gauge } from './weather'
 
 // One band above the prompt, in the spirit of Ribbon (robonuggets/ribbon, MIT): a warm dark
 // strip, cream text, dot bars for what is LEFT of each window, a WARM / COLD chip for the
@@ -21,20 +21,22 @@ const TEXT = '#e8e2d2'
 const MUTED = '#8d8775'
 const EMPTY = '#4a463b'
 const INK = '#1c1a16'
-const ORANGE = '#ff6b1a'
 const YELLOW = '#f5a623'
 const GREEN = '#8fbf6a'
 const RED = '#e06c5a'
 const HUE = { warm: '#cc6363', cold: '#6aaabd', soon: YELLOW, none: MUTED } as const
-const WINDOW_COLOR: Record<string, string> = { seven_day: ORANGE, five_hour: YELLOW }
 const NAMES: Record<string, string> = { five_hour: '5H', seven_day: '7D', spend_limit: 'SPEND' }
-const TONE: Record<string, string> = { calm: MUTED, fast: YELLOW, alert: RED }
+// Token Weather Usage's pace colors, toned for the dark band: green behind the clock, amber ahead of it,
+// red well ahead (15 points) or past 90% used.
+const TONE: Record<string, string> = { calm: '#6fbf73', fast: '#e0a03a', alert: RED }
+const GLYPH = { used: '━', ahead: '╍', margin: '╍', empty: '─' } as const
 
 const CELLS = 10
 const TIGHT_CELLS = 6
-const LOW_AT = 15
 const SOON_MS = 10 * 60 * 1000
 const TICK_MS = 30_000
+// The desktop's smaller text step keeps the band compact; the terminal has one size, its font's.
+const SIZE = 'footnote' as const
 
 const fold = atom({ plugin: 'horizon', key: 'fold' } as const, null as Fold | null)
 
@@ -52,14 +54,9 @@ export function cacheViewOf(s: State, now: number): CacheView {
   return { mode, idleMs, leftMs, tokens, warm, cold }
 }
 
-const dots = (left: number, cells: number) => {
-  const n = Math.max(0, Math.min(cells, Math.round((left / 100) * cells)))
-  return { on: '●'.repeat(n), off: '·'.repeat(cells - n) }
-}
-
 // Models priced on the card, the person's own marked YOU.
 const CARD_MODELS: Array<[string, string]> = [
-  ['FABLE', 'claude-fable-5-1'], ['OPUS', 'claude-opus-5-5'], ['SONNET', 'claude-sonnet-5-5'], ['HAIKU', 'claude-haiku-5-5'],
+  ['OPUS', 'claude-opus-5-5'], ['SONNET', 'claude-sonnet-5-5'], ['HAIKU', 'claude-haiku-5-5'],
 ]
 const familyOf = (model: string | null) => {
   const m = (model ?? '').toLowerCase()
@@ -423,7 +420,7 @@ export const register: Register = on => {
     if (!reading && w.limits.length === 0 && view.mode === 'none') {
       return (
         <Box flexDirection="column">
-          <Box backgroundColor={BG} paddingX={1}><Text color={MUTED}>horizon · waiting for the first reply</Text></Box>
+          <Box backgroundColor={BG} paddingX={1}><Text size={SIZE} color={MUTED}>horizon · waiting for the first reply</Text></Box>
           {below}
         </Box>
       )
@@ -440,28 +437,41 @@ export const register: Register = on => {
       const sp = sparkline()
       const t = trend()
       segs.push(seg('ctx', [
-        <Text key="i" color={f.color} bold>{f.icon} </Text>,
-        <Text key="n" color={TEXT} bold>{short(reading.tokens)}</Text>,
-        <Text key="p" color={MUTED}> {reading.percent}%</Text>,
-        sp.now ? <Text key="sp" color={EMPTY}> {sp.past}</Text> : null,
-        sp.now ? <Text key="sn" color={f.color}>{sp.now}</Text> : null,
-        t ? <Text key="t" color={MUTED}> {t}</Text> : null,
+        <Text size={SIZE} key="i" color={f.color} bold>{f.icon} </Text>,
+        <Text size={SIZE} key="n" color={TEXT} bold>{short(reading.tokens)}</Text>,
+        <Text size={SIZE} key="p" color={MUTED}> {reading.percent}%</Text>,
+        sp.now ? <Text size={SIZE} key="sp" color={EMPTY}> {sp.past}</Text> : null,
+        sp.now ? <Text size={SIZE} key="sn" color={f.color}>{sp.now}</Text> : null,
+        t ? <Text size={SIZE} key="t" color={MUTED}> {t}</Text> : null,
       ]))
     }
 
-    // Each window: what is LEFT as dots, the reset, and pace against the clock.
+    // Each window as Token Weather Usage draws it: the share used against the time elapsed, colored by
+    // pace, then the reset and where the pace so far ends up (or when it runs out, before the reset).
     const gauge = (g: Gauge) => {
-      const col = WINDOW_COLOR[g.kind] ?? TEXT
-      const d = dots(g.left, cells)
+      const tone = TONE[g.tone] ?? TEXT
+      // Neighbouring cells of one kind are one Text.
+      const runs: Array<{ kind: Cell; n: number }> = []
+      for (const c of cellsOf(g, cells)) {
+        const last = runs[runs.length - 1]
+        if (last && last.kind === c) last.n++
+        else runs.push({ kind: c, n: 1 })
+      }
+      const proj = g.projected
       return seg(`w-${g.kind}`, [
-        <Text key="n" color={MUTED} bold>{NAMES[g.kind] ?? g.kind.toUpperCase()} </Text>,
-        <Text key="on" color={col}>{d.on}</Text>,
-        <Text key="off" color={EMPTY}>{d.off}</Text>,
-        <Text key="l" color={col} bold> {g.left}% left</Text>,
-        g.left < LOW_AT ? <Text key="low" color={TEXT} bold> LOW</Text> : null,
-        g.pace > 0 && g.tone !== 'calm' ? <Text key="pace" color={TONE[g.tone]}> +{Math.round(g.pace)} ahead</Text> : null,
-        g.reset ? <Text key="r" color={MUTED}> · {g.reset}</Text> : null,
-        g.out ? <Text key="out" color={g.outSoon ? RED : YELLOW} bold> ⚠ out {g.out}</Text> : null,
+        <Text size={SIZE} key="n" color={MUTED} bold>{NAMES[g.kind] ?? g.kind.toUpperCase()} </Text>,
+        ...runs.map((run, i) => (
+          <Text size={SIZE} mono key={`b${i}`} color={run.kind === 'used' || run.kind === 'ahead' ? tone : run.kind === 'margin' ? MUTED : EMPTY}>
+            {GLYPH[run.kind].repeat(run.n)}
+          </Text>
+        )),
+        <Text size={SIZE} key="u" color={tone} bold> {Math.round(g.used)}%</Text>,
+        g.reset ? <Text size={SIZE} key="r" color={MUTED}> · {g.reset}</Text> : null,
+        g.out
+          ? <Text size={SIZE} key="out" color={g.outSoon ? RED : TONE.fast} bold> ⚠ out {g.out}</Text>
+          : proj !== null
+            ? <Text size={SIZE} key="proj" color={proj >= 85 ? TONE.fast : MUTED}> → {proj}% at reset</Text>
+            : null,
       ])
     }
     for (const l of w.limits) segs.push(gauge(gaugeOf(l, now)))
@@ -469,36 +479,36 @@ export const register: Register = on => {
     // The prompt cache: the chip, the time left or idle, what the next message costs.
     const hue = HUE[view.mode]
     const word = view.mode === 'cold' ? 'COLD' : view.mode === 'none' ? 'CACHE' : 'WARM'
-    const cacheBits = [<Text key="chip" backgroundColor={hue} color={INK} bold>{` ${word} `}</Text>]
+    const cacheBits = [<Text size={SIZE} key="chip" backgroundColor={hue} color={INK} bold>{` ${word} `}</Text>]
     if (view.mode === 'warm' || view.mode === 'soon') {
-      cacheBits.push(<Text key="left" color={hue} bold> {fmtDuration(view.leftMs)} left</Text>)
+      cacheBits.push(<Text size={SIZE} key="left" color={hue} bold> {fmtDuration(view.leftMs)} left</Text>)
       if (view.mode === 'soon' && view.cold != null && view.tokens >= BIG_TOKENS && !s.deadline) {
-        cacheBits.push(<Text key="stake" color={MUTED}> · {fmtUsd(view.cold)} at stake</Text>)
-      } else if (view.warm != null) cacheBits.push(<Text key="next" color={MUTED}> · next {fmtUsd(view.warm)}</Text>)
+        cacheBits.push(<Text size={SIZE} key="stake" color={MUTED}> · {fmtUsd(view.cold)} at stake</Text>)
+      } else if (view.warm != null) cacheBits.push(<Text size={SIZE} key="next" color={MUTED}> · next {fmtUsd(view.warm)}</Text>)
     } else if (view.mode === 'cold') {
-      cacheBits.push(<Text key="idle" color={hue} bold> {fmtDuration(view.idleMs)} idle</Text>)
-      cacheBits.push(<Text key="next" color={TEXT} bold> · next {view.cold == null ? `${short(view.tokens)} to rewrite` : fmtUsd(view.cold)}</Text>)
+      cacheBits.push(<Text size={SIZE} key="idle" color={hue} bold> {fmtDuration(view.idleMs)} idle</Text>)
+      cacheBits.push(<Text size={SIZE} key="next" color={TEXT} bold> · next {view.cold == null ? `${short(view.tokens)} to rewrite` : fmtUsd(view.cold)}</Text>)
     } else {
-      cacheBits.push(<Text key="wait" color={MUTED}>{s.compacted ? ' compacted' : ' —'}</Text>)
+      cacheBits.push(<Text size={SIZE} key="wait" color={MUTED}>{s.compacted ? ' compacted' : ' —'}</Text>)
     }
-    if (s.deadline && now < s.deadline) cacheBits.push(<Text key="kw" color={GREEN} bold> ♨ {fmtDuration(s.deadline - now)}</Text>)
-    else if (s.stopped) cacheBits.push(<Text key="kw" color={MUTED}> ♨ stopped</Text>)
-    if (s.note) cacheBits.push(<Text key="note" color={GREEN}> ✎ note</Text>)
+    if (s.deadline && now < s.deadline) cacheBits.push(<Text size={SIZE} key="kw" color={GREEN} bold> ♨ {fmtDuration(s.deadline - now)}</Text>)
+    else if (s.stopped) cacheBits.push(<Text size={SIZE} key="kw" color={MUTED}> ♨ stopped</Text>)
+    if (s.note) cacheBits.push(<Text size={SIZE} key="note" color={GREEN}> ✎ note</Text>)
     segs.push(seg('cache', cacheBits))
 
     // The session's cost, and what the last prompt added in dollars and in 5-hour points.
     if (w.cost != null && w.cost > 0) {
       const extra = [w.lastPrompt != null && w.lastPrompt >= 0.01 ? `+${fmtUsd(w.lastPrompt)}` : '', w.lastPrompt5h ? `+${w.lastPrompt5h}pt 5h` : ''].filter(Boolean).join(' · ')
       segs.push(seg('cost', [
-        <Text key="c" color={TEXT} bold>≈{fmtUsd(w.cost)}</Text>,
-        extra ? <Text key="x" color={MUTED}> ({extra})</Text> : null,
+        <Text size={SIZE} key="c" color={TEXT} bold>≈{fmtUsd(w.cost)}</Text>,
+        extra ? <Text size={SIZE} key="x" color={MUTED}> ({extra})</Text> : null,
       ]))
     }
 
     if (w.agents.total > 0) {
       segs.push(seg('agents', w.agents.running > 0
-        ? [<Text key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text key="t" color={MUTED}> · {w.agents.total}</Text>]
-        : [<Text key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]))
+        ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
+        : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]))
     }
 
     // The card: open by default when cold, folded otherwise; a choice holds until the state flips.
@@ -528,11 +538,11 @@ export const register: Register = on => {
         const cold = (view.tokens * p[1]) / 1e6
         return (
           <Box key={`m-${name}`} flexDirection="row" flexShrink={0} marginRight={3}>
-            <Text color={name === mine ? TEXT : MUTED} bold>{name}{name === mine ? ' (YOU)' : ''} </Text>
-            <Text color={HUE.warm}>{fmtUsd(warm)}</Text>
-            <Text color={MUTED}> warm / </Text>
-            <Text color={HUE.cold}>{fmtUsd(cold)}</Text>
-            <Text color={MUTED}> cold</Text>
+            <Text size={SIZE} color={name === mine ? TEXT : MUTED} bold>{name}{name === mine ? ' (YOU)' : ''} </Text>
+            <Text size={SIZE} color={HUE.warm}>{fmtUsd(warm)}</Text>
+            <Text size={SIZE} color={MUTED}> warm / </Text>
+            <Text size={SIZE} color={HUE.cold}>{fmtUsd(cold)}</Text>
+            <Text size={SIZE} color={MUTED}> cold</Text>
           </Box>
         )
       }) : []
@@ -540,10 +550,10 @@ export const register: Register = on => {
       const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
       card = (
         <Box key="card" flexDirection="column" paddingX={1} paddingBottom={1}>
-          <Text color={hue} bold>{state}</Text>
-          {prices.length ? <Box flexDirection="row" flexWrap="wrap"><Text color={MUTED}>Next message  </Text>{prices}</Box> : null}
+          <Text size={SIZE} color={hue} bold>{state}</Text>
+          {prices.length ? <Box flexDirection="row" flexWrap="wrap"><Text size={SIZE} color={MUTED}>Next message  </Text>{prices}</Box> : null}
           <Box flexDirection="row" alignItems="center" flexWrap="wrap">
-            <Text color={s.deadline ? GREEN : MUTED}>♨ {keep}  </Text>
+            <Text size={SIZE} color={s.deadline ? GREEN : MUTED}>♨ {keep}  </Text>
             {s.deadline
               ? <Button key="kw-off" label="Stop keepwarm" hotkey="k" onPress={() => stop($, s, null)} />
               : view.mode === 'cold'
@@ -551,10 +561,10 @@ export const register: Register = on => {
                 : <Button key="kw-on" label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />}
           </Box>
           <Box flexDirection="row" alignItems="center" flexWrap="wrap">
-            <Text color={s.note ? GREEN : MUTED}>✎ handoff {handoffLine(s, now)}  </Text>
+            <Text size={SIZE} color={s.note ? GREEN : MUTED}>✎ handoff {handoffLine(s, now)}  </Text>
             {s.note ? <Button key="handoff" label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} /> : null}
           </Box>
-          <Text color={MUTED}>guard {s.guard === 'refuse' ? 'stops a cold send once (resend to pay)' : 'shows the price and sends'} · {s.misses.length} cold write{s.misses.length === 1 ? '' : 's'} paid this session, {fmtUsd(paid)}</Text>
+          <Text size={SIZE} color={MUTED}>guard {s.guard === 'refuse' ? 'stops a cold send once (resend to pay)' : 'shows the price and sends'} · {s.misses.length} cold write{s.misses.length === 1 ? '' : 's'} paid this session, {fmtUsd(paid)}</Text>
         </Box>
       )
     }

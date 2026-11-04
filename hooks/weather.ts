@@ -34,8 +34,10 @@ const SPANS: Record<string, number> = { five_hour: 5 * HOUR, seven_day: WEEK }
 const ORDER = ['five_hour', 'seven_day', 'spend_limit']
 const PACE_ALERT = 15
 const USED_ALERT = 90
-const OUT_MIN_ELAPSED = DAY
-const OUT_MIN_USED = 15
+// A projection needs enough of the window behind it to mean anything: a quarter hour and 5% of
+// the 5-hour window, a day and 15% of the week (as Token Weather Usage's run-out warning).
+const MIN_ELAPSED: Record<string, number> = { five_hour: 15 * MINUTE, seven_day: DAY }
+const MIN_USED: Record<string, number> = { five_hour: 5, seven_day: 15 }
 
 export type Tone = 'calm' | 'fast' | 'alert'
 export type Gauge = {
@@ -48,9 +50,25 @@ export type Gauge = {
   pace: number
   tone: Tone
   reset: string
-  /** When the 7-day limit runs out at this week's pace, if before its reset. */
+  /** The share used at the reset if the pace so far holds, 0 to 100+; null until enough of the window has passed. */
+  projected: number | null
+  /** When the window runs out at that pace, if before its reset: "in 1h40" for 5 hours, "Sun night" for the week. */
   out: string | null
   outSoon: boolean
+}
+
+export type Cell = 'used' | 'ahead' | 'margin' | 'empty'
+
+/**
+ * Token Weather Usage's bar: solid up to the share used and the time elapsed, whichever is
+ * less; the gap between them dashed, in the bar's color when using faster than time
+ * (`ahead`), grey when there is margin (`margin`); the rest a thin track.
+ */
+export function cellsOf(g: Gauge, cells: number): Cell[] {
+  const used = Math.round((Math.min(100, g.used) / 100) * cells)
+  const time = g.elapsed === null ? used : Math.round((g.elapsed / 100) * cells)
+  return Array.from({ length: cells }, (_, i) =>
+    i < Math.min(used, time) ? 'used' : i < used ? 'ahead' : i < time ? 'margin' : 'empty')
 }
 
 export type Agents = { running: number; total: number; names: string[] }
@@ -160,20 +178,24 @@ export function gaugeOf(limit: SessionRateLimit, now: number): Gauge {
   const pace = elapsed === null ? 0 : used - elapsed
   const tone: Tone = used >= USED_ALERT || pace > PACE_ALERT ? 'alert' : pace > 0 ? 'fast' : 'calm'
   const reset = until === null ? '' : until <= 0 ? 'resetting' : duration(until)
+  let projected: number | null = null
   let out: string | null = null
   let outSoon = false
-  // The week's pace decides when the 7-day limit runs out, as Claude's usage page does.
-  if (limit.kind === 'seven_day' && Number.isFinite(resetMs)) {
-    const start = resetMs - WEEK
-    if (now - start >= OUT_MIN_ELAPSED && used >= OUT_MIN_USED && used < 100) {
-      const at = now + (100 - used) / (used / (now - start))
-      if (at < resetMs) {
-        out = dayPart(at)
-        outSoon = at - now < DAY
+  // The pace since the window opened decides, as Claude's usage page does for the week.
+  if (span && until !== null && until > 0) {
+    const ran = span - until
+    if (ran >= (MIN_ELAPSED[limit.kind] ?? DAY) && used >= (MIN_USED[limit.kind] ?? 15)) {
+      projected = Math.round((used / ran) * span)
+      if (used < 100) {
+        const at = now + (100 - used) / (used / ran)
+        if (at < resetMs) {
+          out = limit.kind === 'seven_day' ? dayPart(at) : `in ${duration(at - now)}`
+          outSoon = limit.kind === 'seven_day' ? at - now < DAY : at - now < HOUR
+        }
       }
     }
   }
-  return { kind: limit.kind, left, used, elapsed, pace, tone, reset, out, outSoon }
+  return { kind: limit.kind, left, used, elapsed, pace, tone, reset, projected, out, outSoon }
 }
 
 const fiveHourOf = (list: readonly SessionRateLimit[]) => list.find(l => l.kind === 'five_hour')?.percentUsed ?? null
