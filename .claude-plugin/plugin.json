@@ -1,0 +1,23 @@
+{
+  "name": "horizon",
+  "version": "0.1.0",
+  "description": "A Ribbon-style band above the prompt with Token Weather's figures (context weather, per-prompt bars, 5h/7d limits against the clock, cache time left, session cost, agents) and Cache Tax's guard and keepwarm, plus a handoff note written before the cache goes cold.",
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "iLikeToLie",
+    "url": "https://github.com/iLikeToLie"
+  },
+  "homepage": "https://github.com/iLikeToLie/Horizon",
+  "repository": "https://github.com/iLikeToLie/Horizon",
+  "keywords": [
+    "usage",
+    "rate-limit",
+    "prompt-cache",
+    "keepwarm",
+    "cost",
+    "status",
+    "mod",
+    "claude-code"
+  ]
+}
