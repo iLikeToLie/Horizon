@@ -559,7 +559,10 @@ export const register: Register = on => {
     const stored = await read($, fold)
     // The same card and buttons on every surface: the terminal presses them by click, Enter or hotkey (ctrl+x tab focuses the band).
     const open = stored && stored.mode === foldMode ? stored.open : foldMode === 'cold'
-    const toggle = () => update($, fold, f => ({ mode: foldMode, open: !(f && f.mode === foldMode ? f.open : foldMode === 'cold') }))
+    // Flip what this render shows, not a value recomputed from the store: if the two ever differ (the cache flipped
+    // between warm and cold, or a stale handler fired), Hide would write a state the next render overrides and the card
+    // could never be folded again.
+    const toggle = () => update($, fold, () => ({ mode: foldMode, open: !open }))
 
     const row = (
       <Box key="row" flexDirection="row" paddingX={1} alignItems="center">
