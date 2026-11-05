@@ -72,6 +72,12 @@ test('a warm cache: weather, pace-colored usage bars, the WARM chip and its time
   expect((await band.find({ key: 'horizon-fold' }))?.props.label).toBe('Show')
   await band.press({ key: 'horizon-fold' })
   expect(textOf(await band.find({ key: 'card' }))).toContain('Keep warm 6h')
+  // Hide folds it again, and Show reopens it.
+  await band.press({ key: 'horizon-fold' })
+  expect(await band.find({ key: 'card' })).toBeUndefined()
+  expect((await band.find({ key: 'horizon-fold' }))?.props.label).toBe('Show')
+  await band.press({ key: 'horizon-fold' })
+  expect(await band.find({ key: 'card' })).toBeDefined()
   await band.unmount()
 })
 
