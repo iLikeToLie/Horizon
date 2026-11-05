@@ -26,16 +26,16 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 
 - **Context:** the tokens in context, with a weather icon for how full the window is (☀ ☁ ☂ ☇ ↯). Then the share of the window, one bar per recent prompt, and the last prompt's change.
 - **5H / 7D:** Token Weather Usage's bar. It is solid up to the share **used**; the gap to the time elapsed is dashed, in the bar's color when you are using faster than time passes and grey when you have margin. Green means behind the clock, amber ahead of it, red well ahead (15 points) or past 90% used. Then the time to reset, and where the pace so far ends up: `→ 72% at reset`, or `⚠ out in 58m` / `⚠ out Sun night` when it would run out before the reset.
-- **Cache:** `WARM` with the time left and what the next message costs. Under 10 minutes it turns yellow and shows what is at stake. `COLD` appears once the 1-hour warm period is over, with how long you have been idle and the price of rewriting the cache. `♨` shows a keepwarm window and `✎ note` shows a handoff note is ready.
+- **Cache:** `WARM` with the time left and what the next message costs. Under 10 minutes it turns yellow and shows what is at stake. `COLD` appears once the 1-hour warm period is over, with how long you have been idle and the price of rewriting the cache. `♨` shows a keepwarm window: green while the pings left in it cost less than one cold rewrite, amber `♨≥` once they cost as much or more. With keepwarm off, a dim `♨` appears in the last 10 minutes, green when a 6-hour window would pay for itself. `✎ note` shows a handoff note is ready; once your next message puts it out of date, a dim `✎` stays for the rest of the session to say one was written (`/handoff show` still prints it).
 - **Cost:** the session cost, what the last prompt added, and the 5-hour points it used. On a subscription these are API-price equivalents, not a bill.
-- **Agents:** the subagents running now and how many have run in total.
+- **Agents:** the subagents running now and how many have run in total. Hover over it to see their names (or the last ones that ran) laid over the same spot; nothing else moves. Hover needs a pointer: the desktop app, or a terminal that reports the mouse.
 
 **Show / Hide** (hotkey `w`) opens a card with:
 
 - the cache state
 - the warm and cold price of the next message on Opus, Sonnet and Haiku, with yours marked `YOU`
-- keepwarm, with a **Keep warm 6h** / **Stop keepwarm** button (`k`)
-- the handoff note, with a **Clear and continue** button (`h`)
+- keepwarm, with a **Keep warm 6h** / **Stop keepwarm** button (`k`), and whether it pays: what one ping costs, how many pings one cold write is worth, and what the pings left in the window come to
+- the handoff note, with a **Clear and continue** button (`h`), or **Write note now** (`n`) when there is none
 - the guard mode and the cold writes paid this session
 
 The card opens by itself when the cache goes cold. In the terminal, click a button, or focus the band with ctrl+x tab and use its hotkey.
@@ -46,7 +46,9 @@ From 50k tokens of context, the first message you type after the 1-hour warm per
 
 ## Handoff note
 
-After 50 idle minutes, while the cache is still warm, the mod forks the conversation once and asks for a short handoff note. That fork reads the cached prefix at the cache-read rate, so it costs cents rather than the dollars of a cold rewrite. It also refreshes the cache once. No note is written while keepwarm is on, or for contexts under 50k tokens. `/handoff` clears the conversation and puts the note in your prompt box to edit and send. `/handoff show` prints the note. `/horizon handoff off` turns it off.
+After 50 idle minutes, while the cache is still warm, the mod forks the conversation once and asks for a short handoff note. That fork reads the cached prefix at the cache-read rate, so it costs cents rather than the dollars of a cold rewrite. It also refreshes the cache once. No note is written while keepwarm is on, or for contexts under 50k tokens. `/handoff` clears the conversation and puts the note in your prompt box to edit and send. `/handoff show` prints the note, or the last one marked out of date. `/horizon handoff off` turns it off.
+
+`/handoff now` writes a note at once, whatever the idle time or the switch, in the background; a toast says when it is ready. On a cold cache it first shows the rewrite price, and a second `/handoff now` within 2 minutes pays it.
 
 ## Commands
 
@@ -58,7 +60,7 @@ After 50 idle minutes, while the cache is still warm, the mod forks the conversa
     /horizon guard warn     show the price and send, never hold
     /horizon guard refuse   hold a cold send once (default)
     /horizon handoff on|off
-    /handoff [show]
+    /handoff [now | show]
 
 Pings cost tokens: a cache read plus a one-word answer. A one-hour cache is the default on a subscription. On an API key, set `promptCacheTtl` to `"1h"`.
 

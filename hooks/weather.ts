@@ -71,7 +71,9 @@ export function cellsOf(g: Gauge, cells: number): Cell[] {
     i < Math.min(used, time) ? 'used' : i < used ? 'ahead' : i < time ? 'margin' : 'empty')
 }
 
-export type Agents = { running: number; total: number; names: string[] }
+/** `names` are the running agents'; `recent` the last few that finished, newest last, for the hover when none runs. */
+export type Agents = { running: number; total: number; names: string[]; recent: string[] }
+const RECENT_AGENTS = 3
 
 export type Weathers = {
   readings: Reading[]
@@ -83,10 +85,10 @@ export type Weathers = {
 }
 
 // The band's figures, one set per loaded module.
-export const w: Weathers & { base: number | null; base5h: number | null; reset5h: number | null; seen: Set<string> } = {
+export const w: Weathers & { base: number | null; base5h: number | null; reset5h: number | null; seen: Map<string, string> } = {
   readings: [], limits: [], cost: null, lastPrompt: null, lastPrompt5h: null,
-  agents: { running: 0, total: 0, names: [] },
-  base: null, base5h: null, reset5h: null, seen: new Set(),
+  agents: { running: 0, total: 0, names: [], recent: [] },
+  base: null, base5h: null, reset5h: null, seen: new Map(),
 }
 
 export function resetWeather() {
@@ -94,8 +96,8 @@ export function resetWeather() {
   w.lastPrompt = null
   w.lastPrompt5h = null
   w.base = w.cost
-  w.agents = { running: 0, total: 0, names: [] }
-  w.seen = new Set()
+  w.agents = { running: 0, total: 0, names: [], recent: [] }
+  w.seen = new Map()
 }
 
 export function pushReading(context: { tokens?: number; window: number; percent?: number } | undefined) {
@@ -246,8 +248,11 @@ export async function refreshAgents($: EngineInterface): Promise<boolean> {
     return false
   }
   const running = list.filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
-  for (const a of list) w.seen.add(a.id)
-  const next: Agents = { running: running.length, total: w.seen.size, names: running.map(a => a.description || a.type).filter(Boolean) }
+  // Every agent seen this thread, in the order first seen, by its name; a list that drops finished ones keeps them here.
+  for (const a of list) w.seen.set(a.id, a.description || a.type || w.seen.get(a.id) || '')
+  const live = new Set(running.map(a => a.id))
+  const recent = [...w.seen].filter(([id, name]) => !live.has(id) && name).map(([, name]) => name).slice(-RECENT_AGENTS)
+  const next: Agents = { running: running.length, total: w.seen.size, names: running.map(a => a.description || a.type).filter(Boolean), recent }
   const changed = next.running !== w.agents.running || next.total !== w.agents.total
   w.agents = next
   return changed
