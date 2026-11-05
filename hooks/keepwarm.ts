@@ -68,6 +68,8 @@ export type Note = { text: string; at: number; usd: number | null; forTurn: numb
 export type State = {
   handoffOn: boolean
   note: Note | null
+  /** The last note written in this process, kept after it goes out of date and across /clear, so the band can say one exists and /handoff show can still print it. */
+  lastNote: Note | null
   noteFailed: string | null
   turnNo: number
   noteTriedFor: number
@@ -508,16 +510,17 @@ export function card(s: State, now: number): string {
 /** One line on the handoff note: ready, failed, off, or when it will be written. */
 export function handoffLine(s: State, now: number): string {
   if (s.noteWriting) return 'being written…'
-  if (!s.handoffOn) return 'off (/horizon handoff on; /handoff now still writes one)'
   if (s.note) return `ready, written ${fmtDuration(now - s.note.at)} ago for ${fmtUsd(s.note.usd)} (/handoff to /clear and continue from it, /handoff show to read it)`
-  if (s.noteFailed) return `not written: ${s.noteFailed}`
-  if (s.deadline) return 'not needed while keepwarm holds the cache'
-  return `written over the warm cache after ${fmtDuration(HANDOFF_FROM_MS)} idle, from ${fmtTok(BIG_TOKENS)} tokens of context`
+  const last = s.lastNote ? `; the last one, written ${fmtDuration(now - s.lastNote.at)} ago, is out of date (/handoff show prints it)` : ''
+  if (!s.handoffOn) return `off (/horizon handoff on; /handoff now still writes one)${last}`
+  if (s.noteFailed) return `not written: ${s.noteFailed}${last}`
+  if (s.deadline) return `not needed while keepwarm holds the cache${last}`
+  return `written over the warm cache after ${fmtDuration(HANDOFF_FROM_MS)} idle, from ${fmtTok(BIG_TOKENS)} tokens of context${last}`
 }
 
 export function freshState(): State {
   return {
-    handoffOn: true, note: null, noteFailed: null, turnNo: 0, noteTriedFor: -1, noteWriting: false, handoffAckedAt: 0,
+    handoffOn: true, note: null, lastNote: null, noteFailed: null, turnNo: 0, noteTriedFor: -1, noteWriting: false, handoffAckedAt: 0,
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
@@ -575,6 +578,7 @@ export async function writeHandoff($: EngineInterface, s: State): Promise<'writt
     const u = sent.reply.usage
     const price = priceOf(s.lastModel, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
     s.note = { text: sent.reply.text.trim(), at, usd: price ? pingUsd(u, price) : null, forTurn: turn }
+    s.lastNote = s.note
     s.noteFailed = null
     result = 'written'
     // A warm read refreshed the cache; a full re-write over a cold one paid for it and left it warm too.

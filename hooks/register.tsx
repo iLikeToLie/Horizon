@@ -156,8 +156,13 @@ export const register: Register = on => {
     const arg = String(e.args ?? '').trim()
     if (arg === 'now') return { text: await handoffNow($, s) }
     const note = s.note
+    const now = await $.clock.now()
+    // An out-of-date note can still be read, marked as such; only a current one is continued from.
+    if (arg === 'show' && !note && s.lastNote) {
+      return { text: `(Out of date: written ${fmtDuration(now - s.lastNote.at)} ago, before the conversation moved on. /handoff now writes a fresh one.)\n\n${s.lastNote.text}` }
+    }
     if (!note) {
-      return { text: `No handoff note is ready (${handoffLine(s, await $.clock.now())}). /handoff now writes one; without one: /compact, or /clear and describe the task in a sentence or two.` }
+      return { text: `No handoff note is ready (${handoffLine(s, now)}). /handoff now writes one; without one: /compact, or /clear and describe the task in a sentence or two.` }
     }
     if (arg === 'show') return { text: note.text }
     // A command hook cannot run /clear itself (it would wait on this hook): the clock runs it just after.
@@ -517,7 +522,10 @@ export const register: Register = on => {
       cacheBits.push(<Text size={SIZE} key="kw" color={worth ? GREEN : TONE.fast} bold> ♨{worth ? '' : '≥'} {fmtDuration(s.deadline - now)}</Text>)
     }
     else if (s.stopped) cacheBits.push(<Text size={SIZE} key="kw" color={MUTED}> ♨ stopped</Text>)
+    // ✎ for the rest of the session once a note was written: green "note" while it is current, dim once the conversation moved past it.
     if (s.note) cacheBits.push(<Text size={SIZE} key="note" color={GREEN}> ✎ note</Text>)
+    else if (s.noteWriting) cacheBits.push(<Text size={SIZE} key="note" color={MUTED}> ✎…</Text>)
+    else if (s.lastNote) cacheBits.push(<Text size={SIZE} key="note" color={MUTED} dimColor> ✎</Text>)
     segs.push(seg('cache', cacheBits))
 
     // The session's cost, and what the last prompt added in dollars and in 5-hour points.

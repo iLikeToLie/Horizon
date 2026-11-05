@@ -271,3 +271,32 @@ test('with keepwarm off, a dim ♨ hint shows while the cache is about to lapse'
   expect(row).toContain('at stake')
   await band.unmount()
 })
+
+test('once a note was written, a ✎ stays on the band for the session, and /handoff show still prints the last one', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, {
+    fork: () => ({ isAnswered: true, text: 'Continuing from a previous conversation: keep the pencil.', usage: usage({ cache_creation_input_tokens: 100, output_tokens: 300 }) }),
+  })
+  await $.session.start({ surface: 'desktop', isInteractive: true, cwd: '/work' })
+  await $.turn.complete(turn())
+  let band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  expect(textOf(await band.find({ key: 'row' }))).not.toContain('✎')
+  await band.unmount()
+  await $.command.run(cmd('handoff', 'now'))
+  await clock.advance(100)
+  band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  expect(textOf(await band.find({ key: 'row' }))).toContain('✎ note')
+  await band.unmount()
+  // The next turn puts the note out of date: the ✎ stays, dim, without "note".
+  await $.turn.complete(turn())
+  band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  const row = textOf(await band.find({ key: 'row' }))
+  expect(row).toContain(' ✎')
+  expect(row).not.toContain('✎ note')
+  await band.unmount()
+  const shown = (await $.command.run(cmd('handoff', 'show'))).text
+  expect(shown).toContain('Out of date')
+  expect(shown).toContain('keep the pencil')
+  // Continuing needs a current note.
+  expect((await $.command.run(cmd('handoff', ''))).text).toContain('No handoff note is ready')
+})
