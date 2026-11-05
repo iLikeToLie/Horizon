@@ -71,6 +71,8 @@ export type State = {
   noteFailed: string | null
   turnNo: number
   noteTriedFor: number
+  noteWriting: boolean
+  handoffAckedAt: number
   hasBand: boolean
   sid: string
   deadline: number
@@ -154,13 +156,6 @@ export function pingUsd(u: { input_tokens: number; output_tokens: number; cache_
   return (u.cache_read_input_tokens * price[0] + u.cache_creation_input_tokens * price[1] + u.input_tokens * price[1] / 2 + u.output_tokens * price[2]) / 1e6
 }
 
-/** The read-only upper bound: pings at the cache-read rate that cost as much as one cold write of the same context. */
-export function breakEvenPings(s: State): number | null {
-  const price = priceOf(s.lastModel, s.ctx)
-  if (!price || s.ctx <= 0) return null
-  return Math.floor(price[1] / price[0])
-}
-
 export function isCold(s: State, now: number): boolean {
   return s.lastRequestAt > 0 && !s.compacted && now - s.lastRequestAt >= TTL_MS
 }
@@ -198,6 +193,7 @@ export function resetForClear(s: State) {
   s.steps = 0
   s.note = null
   s.noteFailed = null
+  s.handoffAckedAt = 0
   outdate(s)
   disarm(s)
 }
@@ -500,8 +496,8 @@ export function card(s: State, now: number): string {
   const always = s.always ? ' (always)' : ''
   const idle = s.always ? 'off until the next turn, which arms 6h00m (always)' : 'off (/keepwarm to arm it for 6h00m)'
   lines.push(`keepwarm    ${s.deadline ? (statusText(s, now) ?? '').replace(/^keepwarm /, 'on, ') + always : s.stopped ? `stopped, ${s.stopped}${always}` : idle}`)
-  const pings = breakEvenPings(s)
-  if (pings != null) lines.push(`break-even  up to ${pings} pings at the read rate cost one cold write, about ${fmtDuration(pings * s.every)} of idle at one ping per ${fmtDuration(s.every)}`)
+  const verdict = windowVerdict(s, now)
+  if (verdict) lines.push(`break-even  ${verdictLine(verdict, verdict.open ? s.every : PING_AFTER_MS)}`)
   lines.push(`guard       ${s.guard === 'refuse' ? 'refuse once (/horizon guard warn to only show the price)' : 'warn only (/horizon guard refuse to be stopped once)'}`)
   lines.push(`handoff     ${handoffLine(s, now)}`)
   const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
@@ -511,7 +507,8 @@ export function card(s: State, now: number): string {
 
 /** One line on the handoff note: ready, failed, off, or when it will be written. */
 export function handoffLine(s: State, now: number): string {
-  if (!s.handoffOn) return 'off (/horizon handoff on)'
+  if (s.noteWriting) return 'being written…'
+  if (!s.handoffOn) return 'off (/horizon handoff on; /handoff now still writes one)'
   if (s.note) return `ready, written ${fmtDuration(now - s.note.at)} ago for ${fmtUsd(s.note.usd)} (/handoff to /clear and continue from it, /handoff show to read it)`
   if (s.noteFailed) return `not written: ${s.noteFailed}`
   if (s.deadline) return 'not needed while keepwarm holds the cache'
@@ -520,7 +517,7 @@ export function handoffLine(s: State, now: number): string {
 
 export function freshState(): State {
   return {
-    handoffOn: true, note: null, noteFailed: null, turnNo: 0, noteTriedFor: -1,
+    handoffOn: true, note: null, noteFailed: null, turnNo: 0, noteTriedFor: -1, noteWriting: false, handoffAckedAt: 0,
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
     waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
@@ -540,21 +537,36 @@ export async function maybePrepareHandoff($: EngineInterface, s: State): Promise
   const now = await $.clock.now()
   const idle = now - s.lastRequestAt
   if (idle < HANDOFF_FROM_MS || idle >= HANDOFF_UNTIL_MS) return
-  // Checked again after the await, then claimed with no await in between.
+  // Checked again after the await, then claimed with no await in between (writeHandoff sets inFlight before its first await).
   if (s.inFlight || s.deadline || s.noteTriedFor === s.turnNo) return
   s.noteTriedFor = s.turnNo
+  await writeHandoff($, s)
+}
+
+/**
+ * One fork for a handoff note over the conversation as it stands. Sets inFlight before its first
+ * await, so a caller that checked it with no await since holds the claim. A fork over a cold cache
+ * re-writes the prefix: that is scored as a cold write paid, and the cache is warm again after it.
+ */
+export async function writeHandoff($: EngineInterface, s: State): Promise<'written' | 'failed' | 'outdated'> {
   s.inFlight = true
+  s.noteWriting = true
   const gen = s.gen
   const sentAt = s.lastRequestAt
   const turn = s.turnNo
+  const ctx = s.ctx
+  $.ui.invalidate('ui.render')
   const sent = await $.model.fork({ prompt: HANDOFF_PROMPT }).then(reply => ({ reply }), (err: unknown) => ({ err }))
   const at = await $.clock.now()
   s.inFlight = false
+  s.noteWriting = false
   // A /clear, compaction or a new message replaced what the note was written for.
   if (gen !== s.gen || s.lastRequestAt !== sentAt || turn !== s.turnNo) {
     if (s.deadline && !s.pending) await arm($, s)
-    return
+    $.ui.invalidate('ui.render')
+    return 'outdated'
   }
+  let result: 'written' | 'failed' = 'failed'
   if ('err' in sent) {
     s.noteFailed = sent.err instanceof Error ? sent.err.message : String(sent.err)
   } else if (!sent.reply.isAnswered) {
@@ -564,11 +576,95 @@ export async function maybePrepareHandoff($: EngineInterface, s: State): Promise
     const price = priceOf(s.lastModel, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
     s.note = { text: sent.reply.text.trim(), at, usd: price ? pingUsd(u, price) : null, forTurn: turn }
     s.noteFailed = null
-    // A warm read refreshed the cache.
-    if (u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens) s.lastRequestAt = at
+    result = 'written'
+    // A warm read refreshed the cache; a full re-write over a cold one paid for it and left it warm too.
+    const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
+    const rewrote = ctx > 0 && u.cache_creation_input_tokens >= 0.5 * ctx
+    if (rewrote) s.misses.push({ at, tokens: u.cache_creation_input_tokens, usd: price ? u.cache_creation_input_tokens * price[1] / 1e6 : null })
+    if (warm || rewrote) s.lastRequestAt = at
   }
   if (s.deadline && !s.pending) await arm($, s)
   updateStatus($, s, at)
+  return result
+}
+
+/** How long a cold /handoff now waits for the second one that pays the re-write. */
+export const HANDOFF_ACK_MS = 2 * 60 * 1000
+/** About what the note's answer runs to, for the estimate before it is written. */
+const NOTE_OUTPUT_TOKENS = 500
+
+/** What a note would cost now: the read of the warm prefix and the answer, or the re-write of a cold one. */
+export function noteCostEstimate(s: State, now: number): number | null {
+  const price = priceOf(s.lastModel, s.ctx)
+  if (!price || s.ctx <= 0) return null
+  const prefix = isCold(s, now) ? s.ctx * price[1] : s.ctx * price[0]
+  return (prefix + NOTE_OUTPUT_TOKENS * price[2]) / 1e6
+}
+
+/**
+ * /handoff now: a note written at once, whatever the idle time, keepwarm or the handoff switch.
+ * On a cold cache the first call shows the re-write's price and a second within two minutes pays
+ * it, as the guard does. The fork runs in the background (a command hook that waited on it would
+ * hold the prompt); a toast says how it went. Returns the command's answer.
+ */
+export async function handoffNow($: EngineInterface, s: State): Promise<string> {
+  const now = await $.clock.now()
+  if (!s.lastRequestAt || s.compacted) return 'Nothing to write a note from yet: the conversation needs a reply first (after a compaction, the next turn).'
+  if (s.inFlight) return s.noteWriting ? 'A handoff note is being written already; a toast says when it is ready.' : 'A keepwarm ping is out right now; try /handoff now again in a moment.'
+  if (s.note && s.note.forTurn === s.turnNo) return 'A note for this point of the conversation is ready already: /handoff to clear and continue from it, /handoff show to read it.'
+  const usd = noteCostEstimate(s, now)
+  if (isCold(s, now)) {
+    if (!s.handoffAckedAt || now - s.handoffAckedAt >= HANDOFF_ACK_MS) {
+      s.handoffAckedAt = now
+      return `The prompt cache went cold ${fmtDuration(now - s.lastRequestAt - TTL_MS)} ago, so the note first re-writes up to ${s.ctx.toLocaleString('en-US')} tokens: about ${fmtUsd(usd)}. ` +
+        `Run /handoff now again within ${fmtDuration(HANDOFF_ACK_MS)} to pay it, or /clear and describe the task in a sentence or two.`
+    }
+  }
+  s.handoffAckedAt = 0
+  s.noteTriedFor = s.turnNo
+  // No await between the inFlight check above and writeHandoff's claim.
+  void writeHandoff($, s).then(result => {
+    if (result === 'written') $.ui.toast(`horizon: handoff note ready (${fmtUsd(s.note?.usd ?? null)}). /handoff to clear and continue, /handoff show to read it.`)
+    else if (result === 'failed') $.ui.toast(`horizon: the handoff note was not written: ${s.noteFailed ?? 'unknown error'}`)
+    else $.ui.toast('horizon: the conversation moved on while the note was written, so it was dropped. /handoff now to write a fresh one.')
+  })
+  return `Writing a handoff note (about ${fmtUsd(usd)}); a toast says when it is ready.`
+}
+
+/** What one ping costs: the last warm ping's bill, or a read of the context with a one-word answer. */
+export function pingCostEstimate(s: State): number | null {
+  if (s.last?.warm && s.last.usd != null) return s.last.usd
+  const price = priceOf(s.lastModel, s.ctx)
+  if (!price || s.ctx <= 0) return null
+  return pingUsd({ input_tokens: 10, output_tokens: 5, cache_read_input_tokens: s.ctx, cache_creation_input_tokens: 20 }, price)
+}
+
+/** The pings a keepwarm window has left to send against one cold re-write of the context. */
+export type Verdict = { per: number; pings: number; pingsUsd: number; coldUsd: number; breakEven: number; worth: boolean; open: boolean }
+
+/**
+ * Whether keepwarm pays: the pings left in the open window, or in a fresh default window when none
+ * is open, cost less than one cold re-write. Pings go out every `every` after the last request,
+ * up to the deadline.
+ */
+export function windowVerdict(s: State, now: number): Verdict | null {
+  const per = pingCostEstimate(s)
+  const cold = coldUsd(s)
+  if (per == null || cold == null || per <= 0 || s.ctx <= 0) return null
+  const open = s.deadline > now
+  const deadline = open ? s.deadline : now + DEFAULT_WINDOW_MS
+  const every = open ? s.every : PING_AFTER_MS
+  const from = s.lastRequestAt > 0 ? s.lastRequestAt : now
+  const first = Math.max(now, from + every)
+  const pings = first < deadline ? 1 + Math.floor((deadline - first) / every) : 0
+  return { per, pings, pingsUsd: pings * per, coldUsd: cold, breakEven: Math.floor(cold / per), worth: pings * per < cold, open }
+}
+
+/** One line on the verdict, for the card and /horizon. */
+export function verdictLine(v: Verdict, every: number): string {
+  const window = v.open ? `${v.pings} left in this window` : `a ${fmtDuration(DEFAULT_WINDOW_MS)} window: ${v.pings} pings`
+  return `each ping ≈ ${fmtUsd(v.per)} · one cold write ${fmtUsd(v.coldUsd)} = ${v.breakEven} pings (≈${fmtDuration(v.breakEven * every)} idle) · ` +
+    `${window}, ${fmtUsd(v.pingsUsd)} ${v.worth ? '✓ worth it' : '≥ a cold write, not worth it'}`
 }
 
 export const KEY_HANDOFF = 'handoff'

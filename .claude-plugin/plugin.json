@@ -1,6 +1,6 @@
 {
   "name": "horizon",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A Ribbon-style band above the prompt with Token Weather's figures (context weather, per-prompt bars, 5h/7d limits against the clock, cache time left, session cost, agents) and Cache Tax's guard and keepwarm, plus a handoff note written before the cache goes cold.",
   "license": "Apache-2.0",
   "types": "./types/index.d.ts",

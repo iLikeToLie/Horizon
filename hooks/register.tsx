@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Fold } from '../types'
 import {
-  AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd,
+  AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, verdictLine, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
 import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, refreshAgents, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
@@ -61,6 +61,21 @@ const CARD_MODELS: Array<[string, string]> = [
 const familyOf = (model: string | null) => {
   const m = (model ?? '').toLowerCase()
   return CARD_MODELS.find(([name]) => m.includes(name.toLowerCase()))?.[0] ?? null
+}
+
+/** The agents' names for the hover, cut to fit beside the band's other segments: `a, b +2`. */
+const NAMES_MAX = 40
+function agentNames(names: readonly string[], lead: string): string {
+  if (!names.length) return ''
+  let shown = lead
+  let i = 0
+  for (; i < names.length; i++) {
+    const next = (i ? ', ' : '') + names[i]
+    if (i > 0 && shown.length + next.length > NAMES_MAX) break
+    shown += next
+  }
+  if (shown.length > NAMES_MAX) shown = shown.slice(0, NAMES_MAX - 1) + '…'
+  return i < names.length ? `${shown} +${names.length - i}` : shown
 }
 
 /** /clear, then the handoff note in the prompt box to edit and send. */
@@ -123,8 +138,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'handoff',
-      description: 'Clear and continue from the handoff note written before the cache went cold; show to read it (horizon)',
-      argumentHint: '[show]',
+      description: 'Clear and continue from the handoff note written before the cache went cold; now to write one at once, show to read it (horizon)',
+      argumentHint: '[now | show]',
     })
     updateStatus($, s, now)
     // The band's figures and its ticker: the countdown, agents, and the handoff's moment.
@@ -138,11 +153,13 @@ export const register: Register = on => {
 
   on('command.run', { command: 'handoff' }, async ($, e) => {
     await reseat($, s)
+    const arg = String(e.args ?? '').trim()
+    if (arg === 'now') return { text: await handoffNow($, s) }
     const note = s.note
     if (!note) {
-      return { text: `No handoff note is ready (${handoffLine(s, await $.clock.now())}). Without one: /compact, or /clear and describe the task in a sentence or two.` }
+      return { text: `No handoff note is ready (${handoffLine(s, await $.clock.now())}). /handoff now writes one; without one: /compact, or /clear and describe the task in a sentence or two.` }
     }
-    if (String(e.args ?? '').trim() === 'show') return { text: note.text }
+    if (arg === 'show') return { text: note.text }
     // A command hook cannot run /clear itself (it would wait on this hook): the clock runs it just after.
     $.clock.after(50, () => { void clearAndFill($, note.text) })
     return { text: 'Clearing the conversation; the handoff note will be in your prompt box to edit and send.' }
@@ -416,6 +433,7 @@ export const register: Register = on => {
     const cells = columns < 60 ? TIGHT_CELLS : CELLS
     const reading = lastReading()
     const view = cacheViewOf(s, now)
+    const verdict = windowVerdict(s, now)
 
     if (!reading && w.limits.length === 0 && view.mode === 'none') {
       return (
@@ -483,6 +501,8 @@ export const register: Register = on => {
     if (view.mode === 'warm' || view.mode === 'soon') {
       cacheBits.push(<Text size={SIZE} key="left" color={hue} bold> {fmtDuration(view.leftMs)} left</Text>)
       if (view.mode === 'soon' && view.cold != null && view.tokens >= BIG_TOKENS && !s.deadline) {
+        // Keepwarm is off and the cache is about to lapse: a dim ♨, green when a default window would cost less than the re-write.
+        cacheBits.push(<Text size={SIZE} key="kw-hint" color={verdict?.worth ? GREEN : MUTED} dimColor> ♨</Text>)
         cacheBits.push(<Text size={SIZE} key="stake" color={MUTED}> · {fmtUsd(view.cold)} at stake</Text>)
       } else if (view.warm != null) cacheBits.push(<Text size={SIZE} key="next" color={MUTED}> · next {fmtUsd(view.warm)}</Text>)
     } else if (view.mode === 'cold') {
@@ -491,7 +511,11 @@ export const register: Register = on => {
     } else {
       cacheBits.push(<Text size={SIZE} key="wait" color={MUTED}>{s.compacted ? ' compacted' : ' —'}</Text>)
     }
-    if (s.deadline && now < s.deadline) cacheBits.push(<Text size={SIZE} key="kw" color={GREEN} bold> ♨ {fmtDuration(s.deadline - now)}</Text>)
+    // ♨ green while the pings left cost less than one cold write; amber with ≥ once they cost as much or more.
+    if (s.deadline && now < s.deadline) {
+      const worth = !verdict || verdict.worth
+      cacheBits.push(<Text size={SIZE} key="kw" color={worth ? GREEN : TONE.fast} bold> ♨{worth ? '' : '≥'} {fmtDuration(s.deadline - now)}</Text>)
+    }
     else if (s.stopped) cacheBits.push(<Text size={SIZE} key="kw" color={MUTED}> ♨ stopped</Text>)
     if (s.note) cacheBits.push(<Text size={SIZE} key="note" color={GREEN}> ✎ note</Text>)
     segs.push(seg('cache', cacheBits))
@@ -506,9 +530,20 @@ export const register: Register = on => {
     }
 
     if (w.agents.total > 0) {
-      segs.push(seg('agents', w.agents.running > 0
-        ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
-        : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]))
+      const running = w.agents.running > 0
+      const names = agentNames(running ? w.agents.names : w.agents.recent, running ? '' : 'ran: ')
+      segs.push(seg('agents', [
+        ...(running
+          ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
+          : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]),
+        // The names, only while the pointer is on the segment: laid over it on the band's own row (above the band would be
+        // clipped), so nothing moves and the folded band keeps its one row.
+        names
+          ? <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex' }} flexDirection="row" flexShrink={0} backgroundColor={BG}>
+              <Text size={SIZE} key="agent-names" color={running ? HUE.warm : MUTED} bold>⚙ {names}</Text>
+            </Box>
+          : null,
+      ]))
     }
 
     // The card: open by default when cold, folded otherwise; a choice holds until the state flips.
@@ -560,9 +595,14 @@ export const register: Register = on => {
                 ? null
                 : <Button key="kw-on" label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />}
           </Box>
+          {verdict ? <Text size={SIZE} color={verdict.worth ? MUTED : TONE.fast}>  {verdictLine(verdict, verdict.open ? s.every : PING_AFTER_MS)}</Text> : null}
           <Box flexDirection="row" alignItems="center" flexWrap="wrap">
             <Text size={SIZE} color={s.note ? GREEN : MUTED}>✎ handoff {handoffLine(s, now)}  </Text>
-            {s.note ? <Button key="handoff" label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} /> : null}
+            {s.note
+              ? <Button key="handoff" label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
+              : s.lastRequestAt && !s.compacted && !s.noteWriting
+                ? <Button key="handoff-now" label="Write note now" hotkey="n" onPress={() => { void $.command.run({ command: 'handoff', args: 'now' }) }} />
+                : null}
           </Box>
           <Text size={SIZE} color={MUTED}>guard {s.guard === 'refuse' ? 'stops a cold send once (resend to pay)' : 'shows the price and sends'} · {s.misses.length} cold write{s.misses.length === 1 ? '' : 's'} paid this session, {fmtUsd(paid)}</Text>
         </Box>
