@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { AgentInfo, CommandRunInput, ModelForkResult, On, RenderPropsOf, TurnCompleteInput, TurnUsage } from 'claude-code'
+import type { AgentInfo, CommandRunInput, EngineInterface, ModelForkResult, On, RenderPropsOf, TurnCompleteInput, TurnUsage } from 'claude-code'
 
 const MIN = 60_000
 const HOUR = 60 * MIN
@@ -19,7 +19,7 @@ let turns = 0
 const turn = (): TurnCompleteInput => ({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't' + ++turns, reason: 'answer', usage: usage() })
 
 // The engine beneath the mod: a live context of 200k tokens, two limits, a cost that grows per turn.
-function world(on: On, opts: { fork?: () => ModelForkResult; agents?: () => AgentInfo[] } = {}) {
+function world(on: On, opts: { fork?: () => ModelForkResult; agents?: () => AgentInfo[]; steps?: TurnUsage[] } = {}) {
   mock.store(on)
   const seen = { forks: 0, toasts: [] as string[], logs: [] as string[], entered: [] as string[], commands: [] as string[], filled: [] as string[] }
   let cost = 1
@@ -34,6 +34,9 @@ function world(on: On, opts: { fork?: () => ModelForkResult; agents?: () => Agen
   on('command.run', { command: 'clear' }, ($, e) => { seen.commands.push(e.command); return {} })
   on('prompt.fill', ($, e) => { seen.filled.push(e.text); return { isFilled: true, text: e.text, cursor: e.text.length } })
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], usage: opts.steps?.shift() }
+  })
   on('prompt.submit', ($, e) => { seen.entered.push(e.text); return { text: e.text } })
   on('classic.SessionStart', () => ({}))
   on('ui.log', ($, e) => { seen.logs.push(e.text); return { value: undefined } })
@@ -305,4 +308,64 @@ test('once a note was written, a ✎ stays on the band for the session, and /han
   expect(shown).toContain('keep the pencil')
   // Continuing needs a current note.
   expect((await $.command.run(cmd('handoff', ''))).text).toContain('No handoff note is ready')
+})
+
+// One main turn of requests, each answered with the next usage queued in world's steps; the turn reports their sum.
+async function multiStep($: EngineInterface, steps: { read: number; write: number; messages: number }[], queue: TurnUsage[]) {
+  const id = 't' + ++turns
+  const sum = usage({ cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0, input_tokens: 0 })
+  for (const [index, st] of steps.entries()) {
+    const u = usage({ cache_read_input_tokens: st.read, cache_creation_input_tokens: st.write })
+    queue.push(u)
+    for await (const _ of $.turn.step({ turnId: id, index, messageCount: st.messages, model: 'claude-fable-5-1' } as never)) { /* drain */ }
+    sum.cache_read_input_tokens += u.cache_read_input_tokens
+    sum.cache_creation_input_tokens += u.cache_creation_input_tokens
+    sum.output_tokens += u.output_tokens
+    sum.input_tokens += u.input_tokens
+  }
+  await $.turn.complete({ ...turn(), turnId: id, usage: sum })
+}
+
+test('a long warm turn whose small writes add up past half the context is not a cold write', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const steps: TurnUsage[] = []
+  const seen = world(on, { steps })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run(cmd('horizon', 'handoff off'))
+  await $.turn.complete(turn())
+  // Every request reads the whole context from the cache; the writes sum to 119k, over half of the 200k the turn started with.
+  await multiStep($, [
+    { read: 200000, write: 1500, messages: 10 }, { read: 201500, write: 60000, messages: 12 }, { read: 261500, write: 2000, messages: 14 },
+    { read: 263500, write: 55000, messages: 16 }, { read: 318500, write: 500, messages: 18 },
+  ], steps)
+  expect(seen.logs.join('\n')).not.toContain('cold write of')
+  expect((await $.command.run(cmd('horizon', ''))).text).not.toContain('cold write paid')
+})
+
+test('a request that reads nothing from the cache and writes the context again is one cold write, priced at that request', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const steps: TurnUsage[] = []
+  const seen = world(on, { steps })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run(cmd('horizon', 'handoff off'))
+  await $.turn.complete(turn())
+  await multiStep($, [{ read: 0, write: 200000, messages: 10 }, { read: 200000, write: 3000, messages: 12 }], steps)
+  // 200k at Fable 5.1's $20/MTok 1h write; the warm request after it is not part of the miss.
+  expect(seen.logs.filter(l => l.includes('cold write of'))).toEqual([expect.stringContaining('cold write of 200k tokens paid ($4.00)')])
+  expect((await $.command.run(cmd('horizon', ''))).text).toContain('1 cold write paid')
+})
+
+test('a compaction mid-turn: only the requests before it are scored', async ($, on) => {
+  mock.clock(on, { now: NOW })
+  const steps: TurnUsage[] = []
+  const seen = world(on, { steps })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run(cmd('horizon', 'handoff off'))
+  await $.turn.complete(turn())
+  // The summary after the compaction reads nothing and writes a fresh prefix: not a cold write.
+  await multiStep($, [{ read: 200000, write: 1000, messages: 40 }, { read: 0, write: 150000, messages: 3 }], steps)
+  expect(seen.logs.join('\n')).not.toContain('cold write of')
+  // A cold request before the compaction is still paid.
+  await multiStep($, [{ read: 0, write: 200000, messages: 10 }, { read: 0, write: 150000, messages: 2 }], steps)
+  expect(seen.logs.filter(l => l.includes('cold write of'))).toEqual([expect.stringContaining('cold write of 200k tokens paid')])
 })
