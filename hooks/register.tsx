@@ -3,7 +3,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Fold } from '../types'
 import {
-  AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, verdictLine, warmUsd, windowVerdict,
+  AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
 import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, refreshAgents, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
@@ -592,30 +592,55 @@ export const register: Register = on => {
           </Box>
         )
       }) : []
-      const keep = s.deadline ? (statusText(s, now) ?? 'keepwarm on') : s.stopped ? `keepwarm stopped: ${s.stopped}` : 'keepwarm off: pings the cache every 50 idle minutes so a break does not cost a rewrite'
+      // Keepwarm, handoff and guard as one aligned row each: a label, the state in a few words, a dim detail and the
+      // button at the right edge. The long explanations stay in /horizon.
       const paid = s.misses.reduce((a, m) => a + (m.usd ?? 0), 0)
+      const keepState = s.deadline ? `on · ${fmtDuration(s.deadline - now)} left` : s.stopped ? 'stopped' : 'off'
+      const keepDetail = s.deadline
+        ? !s.lastRequestAt || s.compacted || s.waitForTurn ? 'first ping after the next turn'
+          : isCold(s, now) ? 'cold, pings resume after the next turn'
+          : s.retries ? `API busy, retry ${s.retries}`
+          : `ping in ${fmtDuration(s.lastRequestAt + s.every - now)}`
+        : s.stopped ?? ''
+      const verdictText = verdict
+        ? `${verdict.pings} ping${verdict.pings === 1 ? '' : 's'} ${fmtUsd(verdict.pingsUsd)} vs cold ${fmtUsd(verdict.coldUsd)} ${verdict.worth ? '✓ worth it' : '✗'}`
+        : ''
+      const lastOut = s.lastNote ? ' · last one out of date' : ''
+      const [noteState, noteDetail] = s.noteWriting ? ['writing…', '']
+        : s.note ? ['ready', `${fmtDuration(now - s.note.at)} ago · ${fmtUsd(s.note.usd)}`]
+        : !s.handoffOn ? ['off', lastOut.slice(3)]
+        : s.noteFailed ? ['failed', s.noteFailed]
+        : s.deadline ? ['paused', `keepwarm holds the cache${lastOut}`]
+        : ['auto', `after ${fmtDuration(HANDOFF_FROM_MS)} idle, from ${fmtTok(BIG_TOKENS)}${lastOut}`]
+      const guardState = s.guard === 'refuse' ? 'hold once' : 'warn only'
+      const guardDetail = s.misses.length ? `${s.misses.length} cold write${s.misses.length === 1 ? '' : 's'} paid, ${fmtUsd(paid)}` : 'no cold writes paid'
+      const line = (key: string, icon: string, label: string, state: string, stateColor: string, detail: string, detailColor: string, button: RenderChildren | null) => (
+        <Box key={key} flexDirection="row" alignItems="center">
+          <Text size={SIZE} color={MUTED}>{icon} {label.padEnd(9)}</Text>
+          <Text size={SIZE} color={stateColor} bold>{state}</Text>
+          {detail ? <Text size={SIZE} color={detailColor}>  {detail}</Text> : null}
+          <Box flexGrow={1} />
+          {button ? <Box flexShrink={0} marginLeft={2}>{button}</Box> : null}
+        </Box>
+      )
       card = (
         <Box key="card" flexDirection="column" paddingX={1} paddingBottom={1}>
           {pending ? <Text size={SIZE} color={MUTED}>{pending}</Text> : null}
           {prices.length ? <Box flexDirection="row" flexWrap="wrap"><Text size={SIZE} color={MUTED}>Next message · {short(view.tokens)} tokens  </Text>{prices}</Box> : null}
-          <Box flexDirection="row" alignItems="center" flexWrap="wrap">
-            <Text size={SIZE} color={s.deadline ? GREEN : MUTED}>♨ {keep}  </Text>
-            {s.deadline
+          {line('card-keep', '♨', 'keepwarm', keepState, s.deadline ? GREEN : TEXT,
+            [keepDetail, verdictText].filter(Boolean).join(' · '), verdict && !verdict.worth ? TONE.fast : MUTED,
+            s.deadline
               ? <Button key="kw-off" label="Stop keepwarm" hotkey="k" onPress={() => stop($, s, null)} />
               : view.mode === 'cold'
                 ? null
-                : <Button key="kw-on" label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />}
-          </Box>
-          {verdict ? <Text size={SIZE} color={verdict.worth ? MUTED : TONE.fast}>  {verdictLine(verdict, verdict.open ? s.every : PING_AFTER_MS)}</Text> : null}
-          <Box flexDirection="row" alignItems="center" flexWrap="wrap">
-            <Text size={SIZE} color={s.note ? GREEN : MUTED}>✎ handoff {handoffLine(s, now)}  </Text>
-            {s.note
+                : <Button key="kw-on" label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />)}
+          {line('card-note', '✎', 'handoff', noteState, s.note ? GREEN : s.noteFailed ? TONE.fast : TEXT, noteDetail, MUTED,
+            s.note
               ? <Button key="handoff" label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
               : s.lastRequestAt && !s.compacted && !s.noteWriting
                 ? <Button key="handoff-now" label="Write note now" hotkey="n" onPress={() => { void $.command.run({ command: 'handoff', args: 'now' }) }} />
-                : null}
-          </Box>
-          <Text size={SIZE} color={MUTED}>guard {s.guard === 'refuse' ? 'stops a cold send once (resend to pay)' : 'shows the price and sends'} · {s.misses.length} cold write{s.misses.length === 1 ? '' : 's'} paid this session, {fmtUsd(paid)}</Text>
+                : null)}
+          {line('card-guard', '⛨', 'guard', guardState, TEXT, guardDetail, MUTED, null)}
         </Box>
       )
     }
