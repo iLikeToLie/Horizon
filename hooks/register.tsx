@@ -567,7 +567,7 @@ export const register: Register = on => {
     const row = (
       <Box key="row" flexDirection="row" paddingX={1} alignItems="center">
         <Box flexDirection="row" flexWrap="wrap" flexGrow={1} flexShrink={1}>{segs}</Box>
-        <Box flexShrink={0}><Button key="horizon-fold" label={open ? 'Hide' : 'Show'} hotkey="w" onPress={toggle} /></Box>
+        <Box flexShrink={0}><Button key="horizon-fold" plain label={open ? 'Hide' : 'Show'} hotkey="w" onPress={toggle} /></Box>
       </Box>
     )
 
@@ -630,15 +630,15 @@ export const register: Register = on => {
           {line('card-keep', '♨', 'keepwarm', keepState, s.deadline ? GREEN : TEXT,
             [keepDetail, verdictText].filter(Boolean).join(' · '), verdict && !verdict.worth ? TONE.fast : MUTED,
             s.deadline
-              ? <Button key="kw-off" label="Stop keepwarm" hotkey="k" onPress={() => stop($, s, null)} />
+              ? <Button key="kw-off" plain label="Stop keepwarm" hotkey="k" onPress={() => stop($, s, null)} />
               : view.mode === 'cold'
                 ? null
-                : <Button key="kw-on" label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />)}
+                : <Button key="kw-on" plain label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />)}
           {line('card-note', '✎', 'handoff', noteState, s.note ? GREEN : s.noteFailed ? TONE.fast : TEXT, noteDetail, MUTED,
             s.note
-              ? <Button key="handoff" label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
+              ? <Button key="handoff" plain label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
               : s.lastRequestAt && !s.compacted && !s.noteWriting
-                ? <Button key="handoff-now" label="Write note now" hotkey="n" onPress={() => { void $.command.run({ command: 'handoff', args: 'now' }) }} />
+                ? <Button key="handoff-now" plain label="Write note now" hotkey="n" onPress={() => { void $.command.run({ command: 'handoff', args: 'now' }) }} />
                 : null)}
           {line('card-guard', '⛨', 'guard', guardState, TEXT, guardDetail, MUTED, null)}
         </Box>
