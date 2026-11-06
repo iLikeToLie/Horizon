@@ -313,8 +313,15 @@ export const register: Register = on => {
     const u = r.usage
     if (!e.agentId && u && !s.compacted) {
       const price = priceOf(u.model || e.model, u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens)
-      const was = s.stepWrites ?? { tokens: 0, usd: 0, priced: true }
-      s.stepWrites = { tokens: was.tokens + u.cache_creation_input_tokens, usd: was.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: was.priced && price != null }
+      const add = (was: State['stepWrites']) => {
+        const w = was ?? { tokens: 0, usd: 0, priced: true }
+        return { tokens: w.tokens + u.cache_creation_input_tokens, usd: w.usd + (price ? u.cache_creation_input_tokens * price[1] / 1e6 : 0), priced: w.priced && price != null }
+      }
+      s.stepWrites = add(s.stepWrites)
+      // A cold request reads next to nothing from the cache and writes the context again. A warm one reads it all and writes only
+      // what is new, so a long turn's small writes can add up past half the context without one request having gone cold.
+      // s.ctx is still the context the turn started with: only turn.complete replaces it.
+      if (s.ctx > 20000 && u.cache_read_input_tokens < 0.1 * s.ctx && u.cache_creation_input_tokens >= 0.5 * s.ctx) s.coldWrites = add(s.coldWrites)
     }
     // A main request may have started an agent.
     if (!e.agentId && u) {
@@ -369,12 +376,17 @@ export const register: Register = on => {
       // on the requests before it alone. None before it leaves nothing to score, whatever the guard saw; requests before
       // it that reported no usage leave only the turn's total, an upper bound kept for a send the guard saw go cold.
       const writes = s.stepWrites
-      const write = !compacted ? written : writes ? writes.tokens : s.steps && s.coldWritePending ? written : 0
-      const full = prev > 20000 && write >= 0.5 * prev
+      const colds = s.coldWrites
+      const sum = !compacted ? written : writes ? writes.tokens : s.steps && s.coldWritePending ? written : 0
+      // Where the steps reported usage, a cold write is a request turn.step saw go cold, and only what those requests wrote is
+      // paid. A host that reports no step usage leaves only the turn's sum against the context it started with.
+      const write = colds ? colds.tokens : sum
+      const full = writes ? colds != null : prev > 20000 && write >= 0.5 * prev
       if (full || (s.coldWritePending && write > 0)) {
         // Priced per request when the steps reported usage; otherwise at the tier of the context the comeback re-sent.
         const price = priceOf(s.lastModel, prev || s.ctx)
-        const usd = writes?.priced ? writes.usd : price ? write * price[1] / 1e6 : null
+        const priced = colds ?? writes
+        const usd = priced?.priced ? priced.usd : price ? write * price[1] / 1e6 : null
         s.misses.push({ at: now, tokens: write, usd })
         const extend = s.deadline < now + AUTO_WARM_MS && s.offs === offs
         if (extend) await startWindow($, s, AUTO_WARM_MS, s.every, offs)
@@ -384,6 +396,7 @@ export const register: Register = on => {
     }
     s.coldWritePending = false
     s.stepWrites = null
+    s.coldWrites = null
     s.steps = 0
     // A new main turn: the note written for the last one is out of date.
     if (e.usage) {

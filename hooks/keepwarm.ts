@@ -102,6 +102,8 @@ export type State = {
   turnOffs: number | null
   inFlight: boolean
   stepWrites: StepWrites | null
+  /** What this turn's cold requests wrote: each read next to nothing from the cache and wrote at least half the context again. */
+  coldWrites: StepWrites | null
   steps: number
   endingSid: string
 }
@@ -192,6 +194,7 @@ export function resetForClear(s: State) {
   s.misses = []
   s.waitForTurn = false
   s.stepWrites = null
+  s.coldWrites = null
   s.steps = 0
   s.note = null
   s.noteFailed = null
@@ -523,7 +526,7 @@ export function freshState(): State {
     handoffOn: true, note: null, lastNote: null, noteFailed: null, turnNo: 0, noteTriedFor: -1, noteWriting: false, handoffAckedAt: 0,
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, steps: 0, endingSid: '',
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, coldWrites: null, steps: 0, endingSid: '',
   }
 }
 
