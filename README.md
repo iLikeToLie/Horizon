@@ -35,7 +35,7 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 - the cache state
 - the warm and cold price of the next message on Opus, Sonnet and Haiku, with yours marked `YOU`
 - keepwarm, with a **Keep warm 6h** / **Stop keepwarm** button (`k`), and whether it pays: what one ping costs, how many pings one cold write is worth, and what the pings left in the window come to
-- the handoff note, with a **Clear and continue** button (`h`), or **Write note now** (`n`) when there is none
+- the handoff note, with a **Clear and copy** button (`h`), or **Write note now** (`n`) when there is none
 - the guard mode and the cold writes paid this session
 
 The card opens by itself when the cache goes cold. In the terminal, click a button, or focus the band with ctrl+x tab and use its hotkey.
@@ -46,7 +46,7 @@ From 50k tokens of context, the first message you type after the 1-hour warm per
 
 ## Handoff note
 
-After 50 idle minutes, while the cache is still warm, the mod forks the conversation once and asks for a short handoff note. That fork reads the cached prefix at the cache-read rate, so it costs cents rather than the dollars of a cold rewrite. It also refreshes the cache once. No note is written while keepwarm is on, or for contexts under 50k tokens. `/handoff` clears the conversation and puts the note in your prompt box to edit and send. `/handoff show` prints the note, or the last one marked out of date. `/horizon handoff off` turns it off.
+After 50 idle minutes, while the cache is still warm, the mod forks the conversation once and asks for a short handoff note. That fork reads the cached prefix at the cache-read rate, so it costs cents rather than the dollars of a cold rewrite. It also refreshes the cache once. No note is written while keepwarm is on, or for contexts under 50k tokens. `/handoff` clears the conversation and copies the note to your clipboard, so you can change the model or effort before pasting and sending it (where no clipboard takes it, the note goes in the prompt box instead). `/handoff show` prints the note, or the last one marked out of date. `/horizon handoff off` turns it off.
 
 `/handoff now` writes a note at once, whatever the idle time or the switch, in the background; a toast says when it is ready. On a cold cache it first shows the rewrite price, and a second `/handoff now` within 2 minutes pays it.
 

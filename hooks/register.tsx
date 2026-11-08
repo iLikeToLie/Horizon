@@ -78,13 +78,22 @@ function agentNames(names: readonly string[], lead: string): string {
   return i < names.length ? `${shown} +${names.length - i}` : shown
 }
 
-/** /clear, then the handoff note in the prompt box to edit and send. */
-async function clearAndFill($: EngineInterface, text: string) {
+/**
+ * /clear, then the handoff note on the clipboard, so the model and effort can be changed before it is pasted
+ * and sent. Where no clipboard takes it, the note goes in the prompt box instead.
+ */
+async function clearAndCopy($: EngineInterface, text: string) {
   try {
     await $.command.run({ command: 'clear' })
+    const copied = await $.ui.copy({ text })
+    if (copied.isCopied) {
+      $.ui.toast('horizon: handoff note copied to the clipboard; paste it when ready')
+      return
+    }
     await $.prompt.fill({ text })
+    $.ui.toast(`horizon: could not copy the handoff note (${copied.reason}); it is in your prompt box instead`)
   } catch (err) {
-    $.ui.log(`horizon: could not clear and fill the note (${err instanceof Error ? err.message : String(err)}); /handoff show prints it`)
+    $.ui.log(`horizon: could not clear and copy the note (${err instanceof Error ? err.message : String(err)}); /handoff show prints it`)
   }
 }
 
@@ -138,7 +147,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'handoff',
-      description: 'Clear and continue from the handoff note written before the cache went cold; now to write one at once, show to read it (horizon)',
+      description: 'Clear and copy the handoff note written before the cache went cold, to paste and send; now to write one at once, show to read it (horizon)',
       argumentHint: '[now | show]',
     })
     updateStatus($, s, now)
@@ -166,8 +175,8 @@ export const register: Register = on => {
     }
     if (arg === 'show') return { text: note.text }
     // A command hook cannot run /clear itself (it would wait on this hook): the clock runs it just after.
-    $.clock.after(50, () => { void clearAndFill($, note.text) })
-    return { text: 'Clearing the conversation; the handoff note will be in your prompt box to edit and send.' }
+    $.clock.after(50, () => { void clearAndCopy($, note.text) })
+    return { text: 'Clearing the conversation; the handoff note will be on your clipboard to paste once you have set the model and effort.' }
   })
 
   // On Team and Enterprise accounts a managed plugin seated above this tier handles classic.* and continues beneath it, so
@@ -649,7 +658,7 @@ export const register: Register = on => {
                 : <Button key="kw-on" plain label="Keep warm 6h" hotkey="k" onPress={() => startWindow($, s, DEFAULT_WINDOW_MS, PING_AFTER_MS)} />)}
           {line('card-note', '✎', 'handoff', noteState, s.note ? GREEN : s.noteFailed ? TONE.fast : TEXT, noteDetail, MUTED,
             s.note
-              ? <Button key="handoff" plain label="Clear and continue" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
+              ? <Button key="handoff" plain label="Clear and copy" hotkey="h" onPress={() => { void $.command.run({ command: 'handoff' }) }} />
               : s.lastRequestAt && !s.compacted && !s.noteWriting
                 ? <Button key="handoff-now" plain label="Write note now" hotkey="n" onPress={() => { void $.command.run({ command: 'handoff', args: 'now' }) }} />
                 : null)}

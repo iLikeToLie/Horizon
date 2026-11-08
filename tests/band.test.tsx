@@ -19,9 +19,9 @@ let turns = 0
 const turn = (): TurnCompleteInput => ({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't' + ++turns, reason: 'answer', usage: usage() })
 
 // The engine beneath the mod: a live context of 200k tokens, two limits, a cost that grows per turn.
-function world(on: On, opts: { fork?: () => ModelForkResult; agents?: () => AgentInfo[]; steps?: TurnUsage[] } = {}) {
+function world(on: On, opts: { copies?: boolean; fork?: () => ModelForkResult; agents?: () => AgentInfo[]; steps?: TurnUsage[] } = {}) {
   mock.store(on)
-  const seen = { forks: 0, toasts: [] as string[], logs: [] as string[], entered: [] as string[], commands: [] as string[], filled: [] as string[] }
+  const seen = { forks: 0, toasts: [] as string[], logs: [] as string[], entered: [] as string[], commands: [] as string[], filled: [] as string[], copied: [] as string[] }
   let cost = 1
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
@@ -33,6 +33,7 @@ function world(on: On, opts: { fork?: () => ModelForkResult; agents?: () => Agen
   on('command.list', () => ({ value: [] }))
   on('command.run', { command: 'clear' }, ($, e) => { seen.commands.push(e.command); return {} })
   on('prompt.fill', ($, e) => { seen.filled.push(e.text); return { isFilled: true, text: e.text, cursor: e.text.length } })
+  on('ui.copy', ($, e) => { seen.copied.push(e.text); return { value: opts.copies === false ? { isCopied: false as const, reason: 'no-clipboard' as const } : { isCopied: true as const } } })
   on('turn.complete', ($, e) => ({ text: e.answer }))
   on('turn.step', async function* ($, e) {
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], usage: opts.steps?.shift() }
@@ -107,7 +108,7 @@ test('past the hour: COLD with the rewrite price, the send refused once, the res
   await band.unmount()
 })
 
-test('the handoff note is written over the warm cache before it lapses, and /handoff clears and fills it', async ($, on) => {
+test('the handoff note is written over the warm cache before it lapses, and /handoff clears and copies it', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   const seen = world(on, {
     fork: () => ({ isAnswered: true, text: 'Continuing from a previous conversation: fix the parser.', usage: usage({ cache_creation_input_tokens: 100, output_tokens: 300 }) }),
@@ -126,7 +127,24 @@ test('the handoff note is written over the warm cache before it lapses, and /han
   await clock.advance(100)
   expect(seen.logs).toEqual([])
   expect(seen.commands).toEqual(['clear'])
+  expect(seen.copied[0]).toContain('fix the parser')
+  expect(seen.filled).toEqual([])
+})
+
+test('/handoff puts the note in the prompt box when no clipboard takes it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, {
+    copies: false,
+    fork: () => ({ isAnswered: true, text: 'Continuing from a previous conversation: fix the parser.', usage: usage({ cache_creation_input_tokens: 100, output_tokens: 300 }) }),
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.turn.complete(turn())
+  await clock.advance(52 * MIN)
+  await $.command.run(cmd('handoff', ''))
+  await clock.advance(100)
+  expect(seen.commands).toEqual(['clear'])
   expect(seen.filled[0]).toContain('fix the parser')
+  expect(seen.toasts.some(t => t.includes('prompt box instead'))).toBe(true)
 })
 
 test('/keepwarm arms a window the band shows, and pings at 50 idle minutes', async ($, on) => {
