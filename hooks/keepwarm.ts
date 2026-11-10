@@ -105,6 +105,10 @@ export type State = {
   /** What this turn's cold requests wrote: each read next to nothing from the cache and wrote at least half the context again. */
   coldWrites: StepWrites | null
   steps: number
+  /** Whether a main request of this turn reached turn.step: then the step, not the turn's end, decides what moved the cache clock. */
+  turnStepped: boolean
+  /** Pings in a row that found the cache gone and re-wrote it. */
+  coldPings: number
   endingSid: string
 }
 
@@ -196,6 +200,8 @@ export function resetForClear(s: State) {
   s.stepWrites = null
   s.coldWrites = null
   s.steps = 0
+  s.turnStepped = false
+  s.coldPings = 0
   s.note = null
   s.noteFailed = null
   s.handoffAckedAt = 0
@@ -442,7 +448,25 @@ export async function ping($: EngineInterface, s: State) {
   const warm = u.cache_read_input_tokens > 0 && u.cache_creation_input_tokens < 0.1 * u.cache_read_input_tokens
   const usd = price ? pingUsd(u, price) : null
   s.last = { at: now, read: u.cache_read_input_tokens, write: u.cache_creation_input_tokens, usd, warm }
-  if (!warm) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(u.cache_creation_input_tokens)} tokens (${fmtUsd(usd)}), the cache was already gone`)
+  if (warm) s.coldPings = 0
+  else {
+    const write = u.cache_creation_input_tokens
+    // A ping over an expired cache wrote the context again: that is paid, and the cache is warm after it. Stopping here
+    // would throw away the re-write; a write of under half the context means the fork's prefix is not the conversation's.
+    const rewrote = s.ctx > 0 && write >= 0.5 * s.ctx
+    if (!rewrote) return stop($, s, `the ping read ${fmtTok(u.cache_read_input_tokens)} and wrote ${fmtTok(write)} tokens (${fmtUsd(usd)}), the cache was already gone`)
+    const writeUsd = price ? write * price[1] / 1e6 : null
+    s.misses.push({ at, tokens: write, usd: writeUsd })
+    s.coldPings++
+    // Warm again from this ping either way, so the band and the guard do not call a just-paid cache cold.
+    s.lastRequestAt = now
+    // Twice in a row, with a ping each period, means the cache lasts less than that here: pinging only pays the re-write again.
+    if (s.coldPings >= 2) {
+      return stop($, s, `two pings in a row found the cache gone (the last re-wrote ${fmtTok(write)} tokens, ${fmtUsd(writeUsd)}); ` +
+        'it expires sooner than an hour here, likely a 5-minute cache (an API key without promptCacheTtl "1h", or extra usage)')
+    }
+    $.ui.log(`keepwarm: the ping found the cache gone and re-wrote ${fmtTok(write)} tokens (${fmtUsd(writeUsd)}); it is warm again and keepwarm carries on.`)
+  }
   s.lastRequestAt = now
   await arm($, s)
 }
@@ -526,7 +550,7 @@ export function freshState(): State {
     handoffOn: true, note: null, lastNote: null, noteFailed: null, turnNo: 0, noteTriedFor: -1, noteWriting: false, handoffAckedAt: 0,
     hasBand: false, sid: '', deadline: 0, every: PING_AFTER_MS, always: false, lastRequestAt: 0, lastModel: null, ctx: 0, compacted: false,
     resumedAt: 0, transcript: 0, guard: 'refuse', ackedAt: 0, coldWritePending: false, misses: [], pending: null, last: null, stopped: null,
-    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, coldWrites: null, steps: 0, endingSid: '',
+    waitForTurn: false, retries: 0, retryReason: '', gen: 0, tick: 0, offs: 0, turnOffs: null, inFlight: false, stepWrites: null, coldWrites: null, steps: 0, turnStepped: false, coldPings: 0, endingSid: '',
   }
 }
 
