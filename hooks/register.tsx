@@ -304,6 +304,8 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    let before = 0
+    let stamp = 0
     if (!e.agentId) {
       await reseat($, s)
       // The off count when the turn's first request went out: an off after it wins over what the turn opens.
@@ -315,9 +317,19 @@ export const register: Register = on => {
       s.transcript = e.messageCount
       // Only a request sent before any compaction this turn saw can hold a cold write; what follows one is the summary.
       if (!s.compacted) s.steps++
-      s.lastRequestAt = await $.clock.now()
+      s.turnStepped = true
+      // Stamped before the request goes out, so a ping in flight is outdated by it.
+      before = s.lastRequestAt
+      stamp = await $.clock.now()
+      s.lastRequestAt = stamp
     }
     const r = yield* next(e)
+    // A request that got no response (an overloaded or failing API, a usage-limit refusal, an abort before the reply)
+    // touched no cache: the clock goes back to the last request that did, or pings would be timed past the real expiry.
+    if (!e.agentId && !r.usage && stamp && s.lastRequestAt === stamp) {
+      s.lastRequestAt = before
+      if (s.deadline) await arm($, s)
+    }
     // Each request's write is priced at its own prompt length's tier (Haiku 5.5 changes price at 100k), not the turn's sum.
     const u = r.usage
     if (!e.agentId && u && !s.compacted) {
@@ -354,9 +366,10 @@ export const register: Register = on => {
     const now = await $.clock.now()
     // A sleeping host may deliver this turn before the expired window's timer.
     if (s.deadline && now >= s.deadline) await stop($, s, null)
-    // turn.step stamps the exact request time; when no step of this turn did, the turn's end is the floor.
-    // A turn aborted before it sent anything touched no cache, so it leaves the clock alone.
-    if ((e.usage || !e.isAborted) && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
+    // turn.step stamps the exact request time, and takes it back for a request that got no response; only on a host that
+    // raised no step is the turn's end the floor. A turn aborted before it sent anything touched no cache, so it leaves the clock alone.
+    if (!s.turnStepped && (e.usage || !e.isAborted) && now - s.lastRequestAt > e.durationMs) s.lastRequestAt = now
+    s.turnStepped = false
     const compacted = s.compacted
     s.compacted = false
     if (s.lastRequestAt) s.resumedAt = 0
@@ -409,6 +422,8 @@ export const register: Register = on => {
     s.steps = 0
     // A new main turn: the note written for the last one is out of date.
     if (e.usage) {
+      // A real turn starts a fresh count of cold pings.
+      s.coldPings = 0
       s.turnNo++
       if (s.note && s.note.forTurn !== s.turnNo) s.note = null
       s.noteFailed = null

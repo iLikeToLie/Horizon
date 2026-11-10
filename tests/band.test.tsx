@@ -387,3 +387,60 @@ test('a compaction mid-turn: only the requests before it are scored', async ($, 
   await multiStep($, [{ read: 0, write: 200000, messages: 10 }, { read: 0, write: 150000, messages: 2 }], steps)
   expect(seen.logs.filter(l => l.includes('cold write of'))).toEqual([expect.stringContaining('cold write of 200k tokens paid')])
 })
+
+test('a request that got no response does not move the cache clock, so the ping still lands before the hour', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const steps: TurnUsage[] = []
+  const seen = world(on, { steps })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run(cmd('horizon', 'handoff off'))
+  await $.turn.complete(turn())
+  await $.command.run(cmd('keepwarm', ''))
+  await clock.advance(30 * MIN)
+  // The API refused the next request (overloaded, or the usage limit): the step got no response and the turn none either.
+  for await (const _ of $.turn.step({ turnId: 'failed', index: 0, messageCount: 10, model: 'claude-fable-5-1' } as never)) { /* drain */ }
+  await $.turn.complete({ ...turn(), turnId: 'failed', usage: undefined } as unknown as TurnCompleteInput)
+  // The cache was last touched 30 minutes ago, not now.
+  expect((await $.command.run(cmd('keepwarm', 'status'))).text).toContain('ping in 20m')
+  await clock.advance(20 * MIN)
+  expect(seen.forks).toBe(1)
+})
+
+test('a ping that finds the cache gone pays the re-write once and keeps the window; two in a row stop it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  // Cold, then warm (the streak starts again), then cold twice.
+  const replies = ['cold', 'warm', 'cold', 'cold']
+  const seen = world(on, {
+    fork: () => ({
+      isAnswered: true,
+      text: 'warm',
+      usage: replies.shift() === 'cold' ? usage({ cache_read_input_tokens: 30000, cache_creation_input_tokens: 156000 }) : usage({ cache_creation_input_tokens: 0 }),
+    }),
+  })
+  await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
+  await $.command.run(cmd('horizon', 'handoff off'))
+  await $.turn.complete(turn())
+  await $.command.run(cmd('keepwarm', ''))
+  const status = async () => (await $.command.run(cmd('keepwarm', 'status'))).text
+  await clock.advance(50 * MIN)
+  expect(seen.forks).toBe(1)
+  // 156k at Fable 5.1's $20/MTok 1h write, paid by the ping: counted, and the cache is warm from it.
+  expect(seen.logs.join('\n')).toContain('re-wrote 156k tokens ($3.12)')
+  expect(await status()).toContain('ping in 50m')
+  let card = (await $.command.run(cmd('horizon', ''))).text
+  expect(card).toContain('1 cold write paid')
+  expect(card).toContain('state       warm')
+  await clock.advance(50 * MIN)
+  expect(seen.forks).toBe(2)
+  expect(await status()).toContain('ping in 50m')
+  await clock.advance(50 * MIN)
+  expect(seen.forks).toBe(3)
+  expect(await status()).toContain('ping in 50m')
+  await clock.advance(50 * MIN)
+  expect(seen.forks).toBe(4)
+  expect(await status()).toContain('keepwarm stopped: two pings in a row found the cache gone')
+  card = (await $.command.run(cmd('horizon', ''))).text
+  expect(card).toContain('3 cold writes paid')
+  // The last ping's re-write left the cache warm, so the next message is not held as cold.
+  expect(card).toContain('state       warm')
+})

@@ -64,6 +64,8 @@ After 50 idle minutes, while the cache is still warm, the mod forks the conversa
 
 Pings cost tokens: a cache read plus a one-word answer. A one-hour cache is the default on a subscription. On an API key, set `promptCacheTtl` to `"1h"`.
 
+The 1-hour clock counts only requests that got a response: a request refused or failed before any reply (an overloaded API, the usage limit) touched no cache, so it does not reset the clock or push the next ping later. The cache can still be gone before the hour, for example when the server evicts it early. A ping that finds it gone has already written the context again, so that write is counted as a cold write paid, the cache counts as warm from that ping, and keepwarm carries on. If two pings in a row find the cache gone, keepwarm stops: the cache is lasting less than the ping period, most likely because it is a 5-minute cache (an API key without `promptCacheTtl: "1h"`, or extra usage).
+
 ## Don't install it alongside
 
 If Ribbon, Token Weather Usage or Cache Tax is also installed, you get two bands, two guards on every cold send, and possibly two keepwarm pings. The mod logs a warning if it sees Cache Tax.
