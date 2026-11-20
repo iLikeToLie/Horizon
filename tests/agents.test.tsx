@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, On, RenderPropsOf } from 'claude-code'
+import { clip } from '../hooks/agents'
 
 const MIN = 60_000
 const NOW = Date.parse('2099-01-03T12:00:00Z')
@@ -46,10 +47,14 @@ function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: str
     return { value: { isPlaced: true as const } }
   })
   on('ui.close', ($, e) => { up.delete(e.id); seen.closed.push(e.id); return { value: undefined } })
-  on('ui.view', ($, e) => { seen.viewed.push(e.agentId); return { value: {} } })
+  on('ui.view', ($, e) => {
+    seen.viewed.push(e.agentId)
+    return { value: {} }
+  })
   on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
   on('tool.call', async ($, e) => {
     await gate.wait
+    if (e.tool === 'Bash' && e.command === 'explode') throw new Error('boom')
     if (e.tool !== 'TaskStop') return { result: {} }
     seen.stopped.push(String(e.task_id))
     return opts.stop?.() ?? { result: {} }
@@ -322,5 +327,87 @@ test('a refused stop toasts the reason', async ($, on) => {
   await ui.press({ key: 'stop' })
   expect(seen.stopped).toEqual(['a2'])
   expect(seen.toasts.some(t => t.includes('could not stop write tests') && t.includes('not allowed here'))).toBe(true)
+  await ui.unmount()
+})
+
+test('an agent that comes back to the list after a gap runs on, its time no longer frozen', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const full = ROSTER()
+  let list = full
+  world(on, () => list)
+  await start($, clock, 'desktop')
+  // The engine leaves a1 out of one refresh: the sidebar takes it as done.
+  list = [full[1] as AgentInfo, full[2] as AgentInfo]
+  await clock.advance(MIN)
+  list = full
+  await clock.advance(MIN)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const row = textOf(await ui.find({ key: 'row:a1' }))
+  expect(row).toContain('Running…')
+  const before = row.match(/(\d+m\d+s)/)?.[1]
+  await ui.unmount()
+  await clock.advance(MIN)
+  const later = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(textOf(await later.find({ key: 'row:a1' })).match(/(\d+m\d+s)/)?.[1]).not.toBe(before)
+  await later.unmount()
+})
+
+test('overlapping calls: the line shows the call still running when the newer one ends first', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER)
+  await start($, clock, 'desktop')
+  let releaseA = () => {}
+  let releaseB = () => {}
+  seen.gate.wait = new Promise<void>(resolve => { releaseA = resolve })
+  const a = $.tool.call({ tool: 'Grep', pattern: 'first', agentId: 'a1' })
+  await clock.advance(10)
+  seen.gate.wait = new Promise<void>(resolve => { releaseB = resolve })
+  const b = $.tool.call({ tool: 'Grep', pattern: 'second', agentId: 'a1' })
+  await clock.advance(10)
+  releaseB()
+  await b
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /⎿  Grep "first"/ }))?.text).toContain('Grep "first"')
+  await ui.unmount()
+  releaseA()
+  await a
+  const after = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await after.find({ type: 'Text', text: /⎿  Grep/ })).toBeUndefined()
+  await after.unmount()
+})
+
+test('a call that throws leaves no stuck current line', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  await $.tool.call({ tool: 'Bash', command: 'explode', agentId: 'a1' }).catch(() => undefined)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text', text: /⎿  Bash/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('clip gives nothing at no room and never overflows', () => {
+  expect(clip('Grep something long', 0)).toBe('')
+  expect(clip('Grep something long', -3)).toBe('')
+  expect(clip('Grep something long', 1)).toBe('…')
+  expect(clip('Grep something long', 6)).toBe('Grep …')
+  expect(clip('short', 10)).toBe('short')
+})
+
+test('a start time past now (clock skew) still draws its timeline lane', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [...ROSTER(), agent('a4', 'from the future', 'Explore', 'running', { startTime: NOW + 30 * MIN })])
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'lane:a4' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('idle agents get their own count in the header', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [...ROSTER(), agent('a5', 'teammate', 'teammate', 'idle', { taskStatus: 'running' })])
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(textOf(await ui.find({ type: 'Box' }))).toContain('2 running · 1 idle · 1 done')
   await ui.unmount()
 })

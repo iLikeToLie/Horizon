@@ -22,7 +22,7 @@ const DETAIL_TEXT_MAX = 700
 const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null, doneOpen: false } as AgentsView)
 
 type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed'; activeForm: string }
-type Call = { id: string; tool: string; text: string; at: number }
+type Call = { id: string; tool: string; text: string }
 /** What the pane knows of one agent: the engine's row, merged with what the tool calls and turns told. */
 export type Rec = {
   id: string
@@ -37,7 +37,9 @@ export type Rec = {
   tokens: number
   label: string
   calls: Call[]
+  /** The newest call still running, of those in `busy`: overlapping calls end in any order. */
   current: Call | null
+  busy: Call[]
   todos: Todo[]
   prompt?: string
   result?: string
@@ -72,7 +74,7 @@ export function syncAgents(list: readonly AgentInfo[], now: number) {
   for (const a of list) {
     present.add(a.id)
     const was = roster.get(a.id)
-    const rec: Rec = was ?? { id: a.id, name: '', type: a.type, status: a.status, taskStatus: a.taskStatus, startTime: a.startTime, tokens: 0, label: '', calls: [], current: null, todos: [] }
+    const rec: Rec = was ?? { id: a.id, name: '', type: a.type, status: a.status, taskStatus: a.taskStatus, startTime: a.startTime, tokens: 0, label: '', calls: [], current: null, busy: [], todos: [] }
     rec.name = nameOf(a)
     rec.type = a.type || rec.type
     rec.status = a.status
@@ -89,15 +91,21 @@ export function syncAgents(list: readonly AgentInfo[], now: number) {
     }
     if (isEnded(rec)) {
       rec.endTime ??= now
-      rec.current = null
-    }
+      settle(rec)
+    } else rec.endTime = undefined
   }
   for (const rec of roster.values()) {
     if (present.has(rec.id) || isEnded(rec)) continue
     rec.status = 'completed'
     rec.endTime = now
-    rec.current = null
+    settle(rec)
   }
+}
+
+/** No call runs any more. */
+function settle(rec: Rec) {
+  rec.busy = []
+  rec.current = null
 }
 
 /** The list from the engine, merged into the roster; true when the band's counts changed. */
@@ -117,9 +125,10 @@ export function elapsed(ms: number): string {
   return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
 }
 
-const clip = (text: string, max: number) => {
+export const clip = (text: string, max: number) => {
   const one = text.replace(/\s+/g, ' ').trim()
-  return one.length > max ? one.slice(0, max - 1) + '…' : one
+  if (one.length <= max) return one
+  return max <= 0 ? '' : one.slice(0, max - 1) + '…'
 }
 
 /** One line for a tool call, `Grep "session" in src/`: the tool and the first argument that says what it works on. */
@@ -137,9 +146,11 @@ export type AgentsToggle = { state: 'opened' | 'closed' } | { state: 'failed'; r
 
 /** Open the sidebar, or close it when it stands; where the engine seats no pane the result is `failed`, with its reason. */
 export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' = 'toggle'): Promise<AgentsToggle> {
+  let doing = 'open'
   try {
     const up = (await $.ui.panes()).some(p => p.id === PANE)
     if (up && only === 'toggle') {
+      doing = 'close'
       await $.ui.close({ id: PANE })
       return { state: 'closed' }
     }
@@ -150,7 +161,7 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
     }
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    $.ui.log(`horizon: could not open the agents sidebar (${reason})`)
+    $.ui.log(`horizon: could not ${doing} the agents sidebar (${reason})`)
     return { state: 'failed', reason }
   }
   return { state: 'opened' }
@@ -173,16 +184,21 @@ export function registerAgents(on: On) {
     }
     const rec = input.agentId ? roster.get(input.agentId) : undefined
     if (!rec) return next(e)
-    const call: Call = { id: input.tool_use_id, tool: input.tool, text: describeCall(input), at: await $.clock.now() }
+    const call: Call = { id: input.tool_use_id, tool: input.tool, text: describeCall(input) }
+    rec.busy.push(call)
     rec.current = call
     rec.calls.push(call)
     if (rec.calls.length > CALLS_KEPT) rec.calls = rec.calls.slice(-CALLS_KEPT)
     if (input.tool === 'TodoWrite' && Array.isArray(input.todos)) rec.todos = input.todos as Todo[]
     $.ui.invalidate('ui.render')
-    const ran = await next(e)
-    if (rec.current?.id === call.id) rec.current = null
-    $.ui.invalidate('ui.render')
-    return ran
+    try {
+      return await next(e)
+    } finally {
+      // Whether it answered or threw: off the busy list, and the line shows the newest call still running.
+      rec.busy = rec.busy.filter(c => c !== call)
+      rec.current = rec.busy.at(-1) ?? null
+      $.ui.invalidate('ui.render')
+    }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -198,6 +214,7 @@ export function registerAgents(on: On) {
     const active = recs.filter(r => !isEnded(r))
     const running = recs.filter(r => (kindOf(r) === 'running' || kindOf(r) === 'waiting') && r.status !== 'idle').length
     const done = recs.length - active.length
+    const idle = active.length - running
     const age = (r: Rec) => elapsed((r.endTime ?? now) - r.startTime)
     const dot = (r: Rec, key: string, dim = false) => <Text key={key} color={HUE[kindOf(r)]} dimColor={dim}>⏺</Text>
 
@@ -206,7 +223,7 @@ export function registerAgents(on: On) {
       <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
         {left}
         {compact ? null : <Box flexGrow={1} />}
-        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running · {done} done{compact ? '' : ' '}</Text>
+        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done{compact ? '' : ' '}</Text>
         {compact ? <Box flexGrow={1} /> : null}
         {closeButton}
       </Box>
@@ -257,7 +274,9 @@ export function registerAgents(on: On) {
               label="Open transcript"
               hotkey="o"
               onPress={() => {
-                void $.ui.view({ agentId: one.id }).then(r => { if (r && 'deny' in r && r.deny) $.ui.toast(`horizon: ${r.deny}`) })
+                void $.ui.view({ agentId: one.id })
+                  .then(r => { if (r && 'deny' in r && r.deny) $.ui.toast(`horizon: ${r.deny}`) })
+                  .catch(err => { $.ui.toast(`horizon: could not open the transcript: ${err instanceof Error ? err.message : String(err)}`) })
               }}
             />
             {ended ? null : (
@@ -366,15 +385,15 @@ export function registerAgents(on: On) {
       const cells = Math.max(8, Math.min(30, columns - 34))
       const label = Math.max(10, Math.min(20, columns - cells - 14))
       for (const r of [...recs].sort((a, b) => a.startTime - b.startTime)) {
-        const a = Math.floor(((r.startTime - from) / span) * cells)
-        const b = Math.max(a + 1, Math.ceil((((r.endTime ?? now) - from) / span) * cells))
+        const a = Math.min(cells - 1, Math.max(0, Math.floor(((r.startTime - from) / span) * cells)))
+        const b = Math.min(cells, Math.max(a + 1, Math.ceil((((r.endTime ?? now) - from) / span) * cells)))
         const kind = kindOf(r)
         lanes.push(
           <Box key={`lane:${r.id}`} flexDirection="row">
             {dot(r, 'd')}
             <Text key="l" mono> {clip(`${r.type}(${r.name})`, label).padEnd(label)} </Text>
             <Text key="p" mono dimColor>{'·'.repeat(a)}</Text>
-            <Text key="b" mono color={HUE[kind]}>{'━'.repeat(Math.min(b, cells) - a)}</Text>
+            <Text key="b" mono color={HUE[kind]}>{'━'.repeat(b - a)}</Text>
             <Text key="s" mono dimColor>{'·'.repeat(Math.max(0, cells - b))}</Text>
             <Text key="t" mono dimColor> {age(r)}</Text>
           </Box>,
