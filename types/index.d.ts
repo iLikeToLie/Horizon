@@ -2,7 +2,7 @@
 export type Fold = { mode: 'warm' | 'cold' | 'none'; open: boolean }
 
 /** The agents sidebar: the agent open in its detail view (null for the list), and the one whose Stop is armed. */
-export type AgentsView = { detail: string | null; armed: string | null }
+export type AgentsView = { detail: string | null; armed: string | null; doneOpen: boolean }
 
 declare module 'claude-code' {
   interface PluginState {

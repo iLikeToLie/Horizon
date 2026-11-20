@@ -6,7 +6,7 @@ import {
   AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
-import { noteAnswer, noteSurface, refreshRoster, registerAgents, resetAgents, sessionSurface, toggleAgents } from './agents'
+import { noteAnswer, refreshRoster, registerAgents, resetAgents, toggleAgents } from './agents'
 import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
 import type { Cell, Gauge } from './weather'
 
@@ -103,7 +103,6 @@ export const register: Register = on => {
     const r = await next(e)
     // The horizon band draws this state on every surface that has a band.
     s.hasBand = true
-    noteSurface(e.surface)
     s.handoffOn = (await $.store.get(KEY_HANDOFF)) !== false
     const now = await seat($, s)
     await prune($, s, now)
@@ -255,8 +254,7 @@ export const register: Register = on => {
       return { text: s.handoffOn ? `handoff on: a note is written over the warm cache after ${fmtDuration(HANDOFF_FROM_MS)} idle, for a few cents` : 'handoff off: no note is written before the cache goes cold' }
     }
     if (words[0] === 'agents') {
-      const r = await toggleAgents($, sessionSurface(), 'open')
-      if (r.state === 'unavailable') return { text: 'Agents sidebar is available in the desktop app' }
+      const r = await toggleAgents($, 'open')
       if (r.state === 'failed') return { text: `Agents sidebar could not be opened: ${r.reason}` }
       return { text: 'Agents sidebar opened; click the agents segment on the band, press Esc or × to close it' }
     }
@@ -573,11 +571,11 @@ export const register: Register = on => {
       ]))
     }
 
-    // Click only: opens the sidebar pane on the desktop, a toast anywhere else; clicking again closes it.
+    // Click, or `a` once the band is focused (ctrl+x tab): opens the sidebar on any surface; pressing again closes it.
     if (w.agents.total > 0) {
       const running = w.agents.running > 0
       segs.push(seg('agents', (
-        <Button key="horizon-agents" plain onPress={press => { void toggleAgents($, press.surface) }}>
+        <Button key="horizon-agents" plain hotkey="a" onPress={() => { void toggleAgents($) }}>
           {running
             ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
             : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]}
