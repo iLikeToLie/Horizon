@@ -256,7 +256,9 @@ export const register: Register = on => {
     }
     if (words[0] === 'agents') {
       const r = await toggleAgents($, sessionSurface(), 'open')
-      return { text: r === 'unavailable' ? 'Agents sidebar is available in the desktop app' : 'Agents sidebar opened; click the agents segment on the band, press Esc or × to close it' }
+      if (r.state === 'unavailable') return { text: 'Agents sidebar is available in the desktop app' }
+      if (r.state === 'failed') return { text: `Agents sidebar could not be opened: ${r.reason}` }
+      return { text: 'Agents sidebar opened; click the agents segment on the band, press Esc or × to close it' }
     }
     if (words[0] === 'guard') {
       if (words[1] !== 'warn' && words[1] !== 'refuse') return { text: '/horizon guard takes warn or refuse' }

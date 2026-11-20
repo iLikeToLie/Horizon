@@ -132,24 +132,32 @@ function describeCall(e: Record<string, unknown> & { tool: string }): string {
 
 // ---- The pane. ----
 
+/** What a toggle came to: `failed` carries the engine's reason the pane is not drawn. */
+export type AgentsToggle = { state: 'opened' | 'closed' | 'unavailable' } | { state: 'failed'; reason: string }
+
 /** Open the sidebar, or close it when it stands; on any surface but the desktop's a toast says why not. */
-export async function toggleAgents($: EngineInterface, from: string | null | undefined, only: 'open' | 'toggle' = 'toggle'): Promise<'opened' | 'closed' | 'unavailable'> {
+export async function toggleAgents($: EngineInterface, from: string | null | undefined, only: 'open' | 'toggle' = 'toggle'): Promise<AgentsToggle> {
   if (from !== 'desktop') {
     $.ui.toast(UNAVAILABLE)
-    return 'unavailable'
+    return { state: 'unavailable' }
   }
   try {
     const up = (await $.ui.panes()).some(p => p.id === PANE)
     if (up && only === 'toggle') {
       await $.ui.close({ id: PANE })
-      return 'closed'
+      return { state: 'closed' }
     }
     const opened = await $.ui.open({ id: PANE, title: 'Agents', closeOnEscape: true })
-    if (!opened.isPlaced) $.ui.log(`horizon: the agents sidebar could not be placed (${opened.reason})`)
+    if (!opened.isPlaced) {
+      $.ui.log(`horizon: the agents sidebar could not be placed (${opened.reason})`)
+      return { state: 'failed', reason: String(opened.reason) }
+    }
   } catch (err) {
-    $.ui.log(`horizon: could not open the agents sidebar (${err instanceof Error ? err.message : String(err)})`)
+    const reason = err instanceof Error ? err.message : String(err)
+    $.ui.log(`horizon: could not open the agents sidebar (${reason})`)
+    return { state: 'failed', reason }
   }
-  return 'opened'
+  return { state: 'opened' }
 }
 
 /** The surface the session started on, for a command that has none of its own. */

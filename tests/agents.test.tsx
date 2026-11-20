@@ -20,7 +20,7 @@ const agent = (id: string, description: string, type: string, status: AgentInfo[
 }) as AgentInfo
 
 // The engine beneath the mod: the agents the test sets, and every pane, view, toast and stop it is asked for.
-function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: string } | { result: object } } = {}) {
+function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: string } | { result: object }; unplaced?: string } = {}) {
   mock.store(on)
   const gate = { wait: null as Promise<void> | null }
   const seen = { gate, toasts: [] as string[], opened: [] as string[], closed: [] as string[], stopped: [] as string[], viewed: [] as Array<string | undefined>, logs: [] as string[] }
@@ -39,7 +39,12 @@ function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: str
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { seen.toasts.push(e.text); return { value: undefined } })
   on('ui.panes', () => ({ value: [...up].map(id => ({ id, title: 'Agents', isShown: true, isFocused: false, isPlaced: true })) }))
-  on('ui.open', ($, e) => { up.add(e.id); seen.opened.push(e.id); return { value: { isPlaced: true as const } } })
+  on('ui.open', ($, e) => {
+    seen.opened.push(e.id)
+    if (opts.unplaced) return { value: { isPlaced: false as const, reason: opts.unplaced } }
+    up.add(e.id)
+    return { value: { isPlaced: true as const } }
+  })
   on('ui.close', ($, e) => { up.delete(e.id); seen.closed.push(e.id); return { value: undefined } })
   on('ui.view', ($, e) => { seen.viewed.push(e.agentId); return { value: {} } })
   on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
@@ -108,6 +113,15 @@ test('/horizon agents opens the pane on the desktop, even with no agent, and say
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(textOf(await ui.find({ type: 'Text', text: /No agents yet/ }))).toContain('No agents yet')
   await ui.unmount()
+})
+
+test('/horizon agents says so when the pane could not be placed, with the engine\'s reason', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [], { unplaced: 'no room' })
+  await start($, clock, 'desktop')
+  const text = (await $.command.run(command('agents'))).text
+  expect(text).toContain('could not be opened: no room')
+  expect(text).not.toContain('opened;')
 })
 
 test('the list nests children under their parent and keeps the finished ones in a Done group', async ($, on) => {
