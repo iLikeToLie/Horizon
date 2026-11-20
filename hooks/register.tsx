@@ -6,7 +6,8 @@ import {
   AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
-import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, refreshAgents, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
+import { noteAnswer, noteSurface, refreshRoster, registerAgents, resetAgents, sessionSurface, toggleAgents } from './agents'
+import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
 import type { Cell, Gauge } from './weather'
 
 // One band above the prompt, in the spirit of Ribbon (robonuggets/ribbon, MIT): a warm dark
@@ -63,21 +64,6 @@ const familyOf = (model: string | null) => {
   return CARD_MODELS.find(([name]) => m.includes(name.toLowerCase()))?.[0] ?? null
 }
 
-/** The agents' names for the hover, cut to fit beside the band's other segments: `a, b +2`. */
-const NAMES_MAX = 40
-function agentNames(names: readonly string[], lead: string): string {
-  if (!names.length) return ''
-  let shown = lead
-  let i = 0
-  for (; i < names.length; i++) {
-    const next = (i ? ', ' : '') + names[i]
-    if (i > 0 && shown.length + next.length > NAMES_MAX) break
-    shown += next
-  }
-  if (shown.length > NAMES_MAX) shown = shown.slice(0, NAMES_MAX - 1) + '…'
-  return i < names.length ? `${shown} +${names.length - i}` : shown
-}
-
 /**
  * /clear, then the handoff note on the clipboard, so the model and effort can be changed before it is pasted
  * and sent. Where no clipboard takes it, the note goes in the prompt box instead.
@@ -100,7 +86,7 @@ async function clearAndCopy($: EngineInterface, text: string) {
 /** Every 30 s: the handoff's moment, the agents running, and a redraw for the countdowns. */
 async function tick($: EngineInterface, s: State) {
   await maybePrepareHandoff($, s)
-  await refreshAgents($)
+  await refreshRoster($)
   $.ui.invalidate('ui.render')
 }
 
@@ -108,12 +94,16 @@ export const register: Register = on => {
   const s = freshState()
   let ticker: { cancel: () => void } | null = null
 
+  // The agents sidebar: its own pane, hooks and tool-call tracking, see agents.tsx.
+  registerAgents(on)
+
   // ---- The cache engine (Cache Tax): guard, keepwarm, cold-write scoring, handoff. ----
 
   on('session.start', async ($, e, next) => {
     const r = await next(e)
     // The horizon band draws this state on every surface that has a band.
     s.hasBand = true
+    noteSurface(e.surface)
     s.handoffOn = (await $.store.get(KEY_HANDOFF)) !== false
     const now = await seat($, s)
     await prune($, s, now)
@@ -141,8 +131,8 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'horizon',
-      description: 'Prompt cache card: state, cold price, keepwarm, handoff; guard warn|refuse, handoff on|off (horizon)',
-      argumentHint: '[guard warn | guard refuse | handoff on | handoff off]',
+      description: 'Prompt cache card: state, cold price, keepwarm, handoff; guard warn|refuse, handoff on|off; agents opens the agents sidebar (horizon)',
+      argumentHint: '[guard warn | guard refuse | handoff on | handoff off | agents]',
       immediate: true,
     })
     await $.command.register({
@@ -154,6 +144,7 @@ export const register: Register = on => {
     // The band's figures and its ticker: the countdown, agents, and the handoff's moment.
     ticker?.cancel()
     resetWeather()
+    resetAgents()
     await seedWeather($)
     ticker = $.clock.every(TICK_MS, () => { void tick($, s) })
     $.ui.invalidate('ui.render')
@@ -202,6 +193,7 @@ export const register: Register = on => {
     await reseat($, s)
     if (e.source === 'clear') {
       resetWeather()
+      resetAgents()
       await update($, fold, () => null)
       $.ui.invalidate('ui.render')
       return r
@@ -261,6 +253,12 @@ export const register: Register = on => {
       await $.store.set(KEY_HANDOFF, s.handoffOn)
       updateStatus($, s, now)
       return { text: s.handoffOn ? `handoff on: a note is written over the warm cache after ${fmtDuration(HANDOFF_FROM_MS)} idle, for a few cents` : 'handoff off: no note is written before the cache goes cold' }
+    }
+    if (words[0] === 'agents') {
+      const r = await toggleAgents($, sessionSurface(), 'open')
+      if (r.state === 'unavailable') return { text: 'Agents sidebar is available in the desktop app' }
+      if (r.state === 'failed') return { text: `Agents sidebar could not be opened: ${r.reason}` }
+      return { text: 'Agents sidebar opened; click the agents segment on the band, press Esc or × to close it' }
     }
     if (words[0] === 'guard') {
       if (words[1] !== 'warn' && words[1] !== 'refuse') return { text: '/horizon guard takes warn or refuse' }
@@ -346,7 +344,7 @@ export const register: Register = on => {
     }
     // A main request may have started an agent.
     if (!e.agentId && u) {
-      await refreshAgents($)
+      await refreshRoster($)
       $.ui.invalidate('ui.render')
     }
     return r
@@ -355,7 +353,8 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
     if (e.agentId) {
-      await refreshAgents($)
+      noteAnswer(e.agentId, e.answer)
+      await refreshRoster($)
       $.ui.invalidate('ui.render')
       return r
     }
@@ -574,21 +573,16 @@ export const register: Register = on => {
       ]))
     }
 
+    // Click only: opens the sidebar pane on the desktop, a toast anywhere else; clicking again closes it.
     if (w.agents.total > 0) {
       const running = w.agents.running > 0
-      const names = agentNames(running ? w.agents.names : w.agents.recent, running ? '' : 'ran: ')
-      segs.push(seg('agents', [
-        ...(running
-          ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
-          : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]),
-        // The names, only while the pointer is on the segment: laid over it on the band's own row (above the band would be
-        // clipped), so nothing moves and the folded band keeps its one row.
-        names
-          ? <Box position="absolute" top={0} left={0} display="none" hover={{ display: 'flex' }} flexDirection="row" flexShrink={0} backgroundColor={BG}>
-              <Text size={SIZE} key="agent-names" color={running ? HUE.warm : MUTED} bold>⚙ {names}</Text>
-            </Box>
-          : null,
-      ]))
+      segs.push(seg('agents', (
+        <Button key="horizon-agents" plain onPress={press => { void toggleAgents($, press.surface) }}>
+          {running
+            ? [<Text size={SIZE} key="r" color={HUE.warm} bold>⚙ {w.agents.running} running</Text>, <Text size={SIZE} key="t" color={MUTED}> · {w.agents.total}</Text>]
+            : [<Text size={SIZE} key="t" color={MUTED}>⚙ {w.agents.total} agent{w.agents.total === 1 ? '' : 's'}</Text>]}
+        </Button>
+      )))
     }
 
     // The card: open by default when cold, folded otherwise; a choice holds until the state flips.

@@ -1,0 +1,252 @@
+import { expect, mock, test } from 'claude-code/testing'
+import type { Engine } from 'claude-code/testing'
+import type { AgentInfo, On, RenderPropsOf } from 'claude-code'
+
+const MIN = 60_000
+const NOW = Date.parse('2099-01-03T12:00:00Z')
+const BAND: RenderPropsOf['AbovePrompt'] = {
+  hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 12, bodyColumns: 140, scroll: { offset: 0, bodyRows: 12 }, view: {},
+}
+const PANE = {
+  plugin: 'horizon',
+  component: 'Pane',
+  requestId: 'horizon-agents',
+  props: { title: 'Agents', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
+} as const
+
+const agent = (id: string, description: string, type: string, status: AgentInfo['status'], over: Partial<AgentInfo> = {}) => ({
+  id, description, type, status, taskStatus: status === 'running' ? 'running' : 'completed', kind: 'local_agent', label: description,
+  startTime: NOW - 3 * MIN, cwd: '/work', tokenCount: 0, tokenSamples: [], ...over,
+}) as AgentInfo
+
+// The engine beneath the mod: the agents the test sets, and every pane, view, toast and stop it is asked for.
+function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: string } | { result: object }; unplaced?: string } = {}) {
+  mock.store(on)
+  const gate = { wait: null as Promise<void> | null }
+  const seen = { gate, toasts: [] as string[], opened: [] as string[], closed: [] as string[], stopped: [] as string[], viewed: [] as Array<string | undefined>, logs: [] as string[] }
+  const up = new Set<string>()
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('session.end', ($, e) => ({ sessionId: e.sessionId }))
+  on('session.id', () => ({ value: 'S1' }))
+  on('session.model', () => ({ value: 'claude-fable-5-1' }))
+  on('session.usage', () => ({ value: { startedAt: NOW - 60 * MIN, context: { window: 1000000, tokens: 200000 }, rateLimits: [], cost: { usd: 1 } } }))
+  on('agent.list', () => ({ value: list() }))
+  on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('command.list', () => ({ value: [] }))
+  on('classic.SessionStart', () => ({}))
+  on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('ui.log', ($, e) => { seen.logs.push(e.text); return { value: undefined } })
+  on('ui.status', () => ({ value: undefined }))
+  on('ui.toast', ($, e) => { seen.toasts.push(e.text); return { value: undefined } })
+  on('ui.panes', () => ({ value: [...up].map(id => ({ id, title: 'Agents', isShown: true, isFocused: false, isPlaced: true })) }))
+  on('ui.open', ($, e) => {
+    seen.opened.push(e.id)
+    if (opts.unplaced) return { value: { isPlaced: false as const, reason: opts.unplaced } }
+    up.add(e.id)
+    return { value: { isPlaced: true as const } }
+  })
+  on('ui.close', ($, e) => { up.delete(e.id); seen.closed.push(e.id); return { value: undefined } })
+  on('ui.view', ($, e) => { seen.viewed.push(e.agentId); return { value: {} } })
+  on('ui.render', ($, e) => $.ui.resolve(e).Box({ children: [] }))
+  on('tool.call', async ($, e) => {
+    await gate.wait
+    if (e.tool !== 'TaskStop') return { result: {} }
+    seen.stopped.push(String(e.task_id))
+    return opts.stop?.() ?? { result: {} }
+  })
+  return seen
+}
+
+const textOf = (node: unknown) => JSON.stringify(node)
+const command = (args: string) => ({ command: 'horizon', args, origin: { kind: 'composer' as const }, presentation: { isFullscreen: false, columns: 80 } })
+
+/** The roster as the sidebar sees it: one running explorer with a running child, one finished planner. */
+const ROSTER = () => [
+  agent('a1', 'find auth code', 'Explore', 'running', { model: 'claude-sonnet-5-5', tokenCount: 12000 }),
+  agent('a2', 'write tests', 'general-purpose', 'running', { parentId: 'a1', startTime: NOW - 2 * MIN }),
+  agent('a3', 'design schema', 'Plan', 'completed', { startTime: NOW - 3 * MIN }),
+]
+
+async function start($: Engine, clock: ReturnType<typeof mock.clock>, surface: 'desktop' | 'terminal') {
+  await $.session.start({ surface, isInteractive: true, cwd: '/work' })
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(MIN)
+}
+
+test('clicking the agents segment opens the pane on the desktop and clicking it again closes it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER)
+  await start($, clock, 'desktop')
+  const band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+  const seg = textOf(await band.find({ key: 'agents' }))
+  expect(seg).toContain('2 running')
+  // Click only: no hover overlay, and nothing opened by itself.
+  expect(seg).not.toContain('hover')
+  expect(seen.opened).toEqual([])
+  await band.press({ key: 'horizon-agents' })
+  expect(seen.opened).toEqual(['horizon-agents'])
+  await band.press({ key: 'horizon-agents' })
+  expect(seen.closed).toEqual(['horizon-agents'])
+  await band.unmount()
+})
+
+test('on the terminal the segment toasts and opens no pane; /horizon agents does the same', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER)
+  await start($, clock, 'terminal')
+  const band = await $.ui.mount({ plugin: 'horizon', surface: 'terminal', component: 'AbovePrompt', props: BAND })
+  await band.press({ key: 'horizon-agents' })
+  expect(seen.toasts).toEqual(['Agents sidebar is available in the desktop app'])
+  const r = await $.command.run(command('agents'))
+  expect(r.text).toContain('desktop app')
+  expect(seen.toasts.length).toBe(2)
+  expect(seen.opened).toEqual([])
+  await band.unmount()
+})
+
+test('/horizon agents opens the pane on the desktop, even with no agent, and says "No agents yet"', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, () => [])
+  await start($, clock, 'desktop')
+  expect((await $.command.run(command('agents'))).text).toContain('opened')
+  expect(seen.opened).toEqual(['horizon-agents'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(textOf(await ui.find({ type: 'Text', text: /No agents yet/ }))).toContain('No agents yet')
+  await ui.unmount()
+})
+
+test('/horizon agents says so when the pane could not be placed, with the engine\'s reason', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [], { unplaced: 'no room' })
+  await start($, clock, 'desktop')
+  const text = (await $.command.run(command('agents'))).text
+  expect(text).toContain('could not be opened: no room')
+  expect(text).not.toContain('opened;')
+})
+
+test('the list nests children under their parent and keeps the finished ones in a Done group', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('✻ Agents')
+  expect(all).toContain('2 running · 1 done')
+  expect(all).toContain('Explore(find auth code)')
+  expect(all).toContain('Running…')
+  // The child sits after its parent, indented a level.
+  expect(all.indexOf('general-purpose(write tests)')).toBeGreaterThan(all.indexOf('Explore(find auth code)'))
+  expect(all).toContain('"  "')
+  // Model and tokens on the second line; the finished one under a dim Done (1).
+  expect(all).toContain('claude-sonnet-5-5 · 12k tokens')
+  expect(all).toContain('Done (1)')
+  expect(all.indexOf('Plan(design schema)')).toBeGreaterThan(all.indexOf('Done (1)'))
+  expect(await ui.find({ key: 'row:a3' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the timeline has a lane and a bar per agent, with its duration', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(textOf(await ui.find({ type: 'Text', text: /timeline/ }))).toContain('timeline')
+  for (const id of ['a1', 'a2', 'a3']) {
+    const lane = textOf(await ui.find({ key: `lane:${id}` }))
+    expect(lane).toContain('━')
+  }
+  // The running explorer started 3 minutes before the clock's start and 1 minute has run since.
+  expect(textOf(await ui.find({ key: 'lane:a1' }))).toContain('4m')
+  await ui.unmount()
+})
+
+test('a tool call shows as the agent\'s current line and an agent that left the list is taken as done', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let list = ROSTER()
+  const seen = world(on, () => list)
+  await start($, clock, 'desktop')
+  let release = () => {}
+  seen.gate.wait = new Promise<void>(resolve => { release = resolve })
+  const pending = $.tool.call({ tool: 'Grep', pattern: 'session', path: 'src/', agentId: 'a1' })
+  await clock.advance(10)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect((await ui.find({ type: 'Text', text: /Grep "session" in src\// }))?.text).toContain('⎿  Grep "session" in src/')
+  release()
+  await pending
+  await ui.unmount()
+  // The engine drops a finished agent from its list: the sidebar keeps it, as done.
+  list = [list[0] as AgentInfo, list[2] as AgentInfo]
+  await clock.advance(MIN)
+  const again = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(textOf(await again.find({ type: 'Box' }))).toContain('Done (2)')
+  await again.unmount()
+})
+
+test('a row opens the detail view with the agent\'s facts, and back returns to the list', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let list: AgentInfo[] = []
+  const seen = world(on, () => list)
+  await start($, clock, 'desktop')
+  // The prompt the main loop gave the Agent call is shown as the task, once the agent is in the list.
+  await $.tool.call({ tool: 'Agent', description: 'find auth code', prompt: 'Find where sessions are validated.' })
+  list = ROSTER()
+  await clock.advance(MIN)
+  await $.tool.call({ tool: 'TodoWrite', agentId: 'a1', todos: [{ content: 'Read auth', status: 'in_progress', activeForm: 'Reading auth' }, { content: 'Report', status: 'pending', activeForm: 'Reporting' }] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'row:a2' })
+  let all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('◂ Agents')
+  expect(all).toContain('general-purpose(write tests)')
+  expect(all).toContain('parent: find auth code')
+  expect(all).not.toContain('Done (')
+  await ui.press({ key: 'back' })
+  expect(textOf(await ui.find({ type: 'Box' }))).toContain('Done (1)')
+  await ui.press({ key: 'row:a1' })
+  all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('Find where sessions are validated.')
+  expect(all).toContain('◐ Reading auth')
+  expect(all).toContain('☐ Report')
+  expect(all).toContain('Recent calls')
+  expect(all).toContain('TodoWrite')
+  await ui.press({ key: 'open' })
+  expect(seen.viewed).toEqual(['a1'])
+  // A finished agent has no Stop.
+  await ui.press({ key: 'back' })
+  await ui.press({ key: 'row:a3' })
+  expect(await ui.find({ key: 'stop' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('Stop takes two presses: the first arms it for three seconds, the second calls TaskStop', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER)
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'row:a1' })
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('■ Stop')
+  await ui.press({ key: 'stop' })
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('■ Stop? press again')
+  expect(seen.stopped).toEqual([])
+  // Left alone, it disarms.
+  await clock.advance(3100)
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('■ Stop')
+  await ui.press({ key: 'stop' })
+  await ui.press({ key: 'stop' })
+  expect(seen.stopped).toEqual(['a1'])
+  expect(seen.toasts.some(t => t.includes('stopped find auth code'))).toBe(true)
+  expect((await ui.find({ key: 'stop' }))?.props.label).toBe('■ Stop')
+  await ui.unmount()
+})
+
+test('a refused stop toasts the reason', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER, { stop: () => ({ deny: 'not allowed here' }) })
+  await start($, clock, 'desktop')
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'row:a2' })
+  await ui.press({ key: 'stop' })
+  await ui.press({ key: 'stop' })
+  expect(seen.stopped).toEqual(['a2'])
+  expect(seen.toasts.some(t => t.includes('could not stop write tests') && t.includes('not allowed here'))).toBe(true)
+  await ui.unmount()
+})

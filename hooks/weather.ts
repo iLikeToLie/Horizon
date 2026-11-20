@@ -4,7 +4,7 @@
 // After Token Weather Usage by Eric Cologni (github.com/augiefra/claude-mods,
 // Apache-2.0), itself after Anthropic's Token Weather example. Rewritten in
 // TypeScript, trimmed to what this band draws. Pure except where `$` is passed.
-import type { EngineInterface, SessionRateLimit } from 'claude-code'
+import type { AgentInfo, EngineInterface, SessionRateLimit } from 'claude-code'
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
@@ -71,9 +71,8 @@ export function cellsOf(g: Gauge, cells: number): Cell[] {
     i < Math.min(used, time) ? 'used' : i < used ? 'ahead' : i < time ? 'margin' : 'empty')
 }
 
-/** `names` are the running agents'; `recent` the last few that finished, newest last, for the hover when none runs. */
-export type Agents = { running: number; total: number; names: string[]; recent: string[] }
-const RECENT_AGENTS = 3
+/** The agents the band counts: running now, and every one seen this thread. */
+export type Agents = { running: number; total: number }
 
 export type Weathers = {
   readings: Reading[]
@@ -85,10 +84,10 @@ export type Weathers = {
 }
 
 // The band's figures, one set per loaded module.
-export const w: Weathers & { base: number | null; base5h: number | null; reset5h: number | null; seen: Map<string, string> } = {
+export const w: Weathers & { base: number | null; base5h: number | null; reset5h: number | null; seen: Set<string>; list: readonly AgentInfo[] } = {
   readings: [], limits: [], cost: null, lastPrompt: null, lastPrompt5h: null,
-  agents: { running: 0, total: 0, names: [], recent: [] },
-  base: null, base5h: null, reset5h: null, seen: new Map(),
+  agents: { running: 0, total: 0 },
+  base: null, base5h: null, reset5h: null, seen: new Set(), list: [],
 }
 
 export function resetWeather() {
@@ -96,8 +95,9 @@ export function resetWeather() {
   w.lastPrompt = null
   w.lastPrompt5h = null
   w.base = w.cost
-  w.agents = { running: 0, total: 0, names: [], recent: [] }
-  w.seen = new Map()
+  w.agents = { running: 0, total: 0 }
+  w.seen = new Set()
+  w.list = []
 }
 
 export function pushReading(context: { tokens?: number; window: number; percent?: number } | undefined) {
@@ -239,7 +239,7 @@ export async function measureTurn($: EngineInterface) {
   }
 }
 
-/** The subagents running now and how many this thread has run; true when the count changed. */
+/** The subagents running now and how many this thread has run (the raw list kept for the sidebar); true when the count changed. */
 export async function refreshAgents($: EngineInterface): Promise<boolean> {
   let list
   try {
@@ -248,11 +248,10 @@ export async function refreshAgents($: EngineInterface): Promise<boolean> {
     return false
   }
   const running = list.filter(a => a.status === 'running' || a.status === 'pending' || a.status === 'waiting')
-  // Every agent seen this thread, in the order first seen, by its name; a list that drops finished ones keeps them here.
-  for (const a of list) w.seen.set(a.id, a.description || a.type || w.seen.get(a.id) || '')
-  const live = new Set(running.map(a => a.id))
-  const recent = [...w.seen].filter(([id, name]) => !live.has(id) && name).map(([, name]) => name).slice(-RECENT_AGENTS)
-  const next: Agents = { running: running.length, total: w.seen.size, names: running.map(a => a.description || a.type).filter(Boolean), recent }
+  // Every agent seen this thread; a list that drops finished ones keeps them counted here.
+  for (const a of list) w.seen.add(a.id)
+  w.list = list
+  const next: Agents = { running: running.length, total: w.seen.size }
   const changed = next.running !== w.agents.running || next.total !== w.agents.total
   w.agents = next
   return changed
