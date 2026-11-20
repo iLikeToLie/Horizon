@@ -4,21 +4,22 @@ import type { AgentInfo, EngineInterface, On, RenderChildren } from 'claude-code
 import type { AgentsView } from '../types'
 import { refreshAgents, short, w } from './weather'
 
-// The agents sidebar, a right-hand pane in the desktop app after claude-agentpane's look (dense, one line a row, glyphs,
+// The agents sidebar, a pane on every surface (the desktop's side pane, the terminal's dock or the strip above the prompt) after claude-agentpane's look (dense, one line a row, glyphs,
 // monospace) and Apiarius's core (list, org tree, timeline, detail, stop). The band's agents segment opens it; it never
 // opens or folds by itself. Colors are theme keys, so it follows the person's theme.
 
 export const PANE = 'horizon-agents'
-export const UNAVAILABLE = 'Agents sidebar is available in the desktop app'
 
 const MINUTE = 60_000
 const STOP_ARM_MS = 3000
 const CALLS_KEPT = 40
 const CALLS_SHOWN = 20
+const COMPACT_CALLS = 5
+const ROWS_MAX = 8
 const NAME_MAX = 40
 const DETAIL_TEXT_MAX = 700
 
-const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null } as AgentsView)
+const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null, doneOpen: false } as AgentsView)
 
 type Todo = { content: string; status: 'pending' | 'in_progress' | 'completed'; activeForm: string }
 type Call = { id: string; tool: string; text: string; at: number }
@@ -46,7 +47,6 @@ export type Rec = {
 const roster = new Map<string, Rec>()
 // Prompts of Agent calls not yet matched to a spawned agent, by the call's description.
 const prompts = new Map<string, string[]>()
-let surface: string | null = null
 
 export function resetAgents() {
   roster.clear()
@@ -133,14 +133,10 @@ function describeCall(e: Record<string, unknown> & { tool: string }): string {
 // ---- The pane. ----
 
 /** What a toggle came to: `failed` carries the engine's reason the pane is not drawn. */
-export type AgentsToggle = { state: 'opened' | 'closed' | 'unavailable' } | { state: 'failed'; reason: string }
+export type AgentsToggle = { state: 'opened' | 'closed' } | { state: 'failed'; reason: string }
 
-/** Open the sidebar, or close it when it stands; on any surface but the desktop's a toast says why not. */
-export async function toggleAgents($: EngineInterface, from: string | null | undefined, only: 'open' | 'toggle' = 'toggle'): Promise<AgentsToggle> {
-  if (from !== 'desktop') {
-    $.ui.toast(UNAVAILABLE)
-    return { state: 'unavailable' }
-  }
+/** Open the sidebar, or close it when it stands; where the engine seats no pane the result is `failed`, with its reason. */
+export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' = 'toggle'): Promise<AgentsToggle> {
   try {
     const up = (await $.ui.panes()).some(p => p.id === PANE)
     if (up && only === 'toggle') {
@@ -159,10 +155,6 @@ export async function toggleAgents($: EngineInterface, from: string | null | und
   }
   return { state: 'opened' }
 }
-
-/** The surface the session started on, for a command that has none of its own. */
-export const sessionSurface = () => surface
-export const noteSurface = (from: string | null) => { surface = from }
 
 /** An agent's turn ends with its answer: the result the detail shows. */
 export function noteAnswer(agentId: string | undefined, answer: unknown) {
@@ -197,6 +189,9 @@ export function registerAgents(on: On) {
     const { Box, Text, Button } = $.ui.resolve(e)
     const now = await $.clock.now()
     const columns = e.props.bodyColumns
+    // The dock (a desktop side pane, the terminal's fullscreen layout beside the transcript) has the room for the full form;
+    // above the prompt ('inline') or as a widget, one line an agent.
+    const compact = e.props.placement !== 'dock'
     const v = await read($, view)
     const recs = [...roster.values()]
     const byId = new Map(recs.map(r => [r.id, r]))
@@ -208,14 +203,15 @@ export function registerAgents(on: On) {
 
     const closeButton = <Button key="close" plain role="dismiss" label="×" onPress={() => { void $.ui.close({ id: PANE }) }} />
     const header = (left: RenderChildren) => (
-      <Box key="header" flexDirection="row" alignItems="center" marginBottom={1}>
+      <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
         {left}
-        <Box flexGrow={1} />
-        <Text key="counts" mono dimColor>{running} running · {done} done </Text>
+        {compact ? null : <Box flexGrow={1} />}
+        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running · {done} done{compact ? '' : ' '}</Text>
+        {compact ? <Box flexGrow={1} /> : null}
         {closeButton}
       </Box>
     )
-    const go = (detail: string | null) => () => { void update($, view, () => ({ detail, armed: null })) }
+    const go = (detail: string | null) => () => { void update($, view, s => ({ ...s, detail, armed: null })) }
 
     // ---- Detail: one agent. ----
     const one = v.detail ? byId.get(v.detail) : undefined
@@ -226,18 +222,18 @@ export function registerAgents(on: On) {
       const state = kind === 'running' ? '✶ Running…' : kind === 'waiting' ? '◐ Waiting' : kind === 'failed' ? `✗ ${one.status === 'killed' || one.taskStatus === 'killed' ? 'Stopped' : 'Failed'}` : '✓ Done'
       const facts = [one.model, one.tokens > 0 ? `${short(one.tokens)} tokens` : '', `parent: ${parent ? parent.name : 'main'}`].filter(Boolean).join(' · ')
       const armed = v.armed === one.id
-      const calls = one.calls.slice(-CALLS_SHOWN)
+      const calls = one.calls.slice(compact ? -COMPACT_CALLS : -CALLS_SHOWN)
       return (
         <Box flexDirection="column">
-          {header(<Button key="back" plain label="◂ Agents" onPress={go(null)} />)}
+          {header(<Button key="back" plain label="◂ Agents" hotkey="b" onPress={go(null)} />)}
           <Box key="title" flexDirection="row">
             {dot(one, 'd')}
-            <Text key="n" mono bold> {one.type}({clip(one.name, NAME_MAX)})</Text>
+            <Text key="n" mono bold wrap="truncate-end"> {one.type}({clip(one.name, compact ? Math.max(8, columns - one.type.length - 4) : NAME_MAX)})</Text>
           </Box>
           <Text key="state" mono color={HUE[kind]}>{state} <Text dimColor>{age(one)}</Text></Text>
-          <Text key="facts" mono dimColor>{facts}</Text>
-          {one.prompt ? <Box key="prompt" flexDirection="column" marginTop={1}><Text mono dimColor>Task</Text><Text mono>{clip(one.prompt, DETAIL_TEXT_MAX)}</Text></Box> : null}
-          {one.todos.length ? (
+          <Text key="facts" mono dimColor wrap="truncate-end">{facts}</Text>
+          {one.prompt && !compact ? <Box key="prompt" flexDirection="column" marginTop={1}><Text mono dimColor>Task</Text><Text mono>{clip(one.prompt, DETAIL_TEXT_MAX)}</Text></Box> : null}
+          {one.todos.length && !compact ? (
             <Box key="todos" flexDirection="column" marginTop={1}>
               <Text mono dimColor>Todos</Text>
               {one.todos.map((t, i) => (
@@ -248,24 +244,25 @@ export function registerAgents(on: On) {
             </Box>
           ) : null}
           {calls.length ? (
-            <Box key="calls" flexDirection="column" marginTop={1}>
-              <Text mono dimColor>Recent calls</Text>
+            <Box key="calls" flexDirection="column" marginTop={compact ? 0 : 1}>
+              {compact ? null : <Text mono dimColor>Recent calls</Text>}
               {calls.map(c => <Text key={`c-${c.id}`} mono dimColor={one.current?.id !== c.id} wrap="truncate-end">⎿  {c.text}</Text>)}
             </Box>
           ) : null}
-          {ended && one.result ? <Box key="result" flexDirection="column" marginTop={1}><Text mono dimColor>Result</Text><Text mono>{clip(one.result, DETAIL_TEXT_MAX)}</Text></Box> : null}
-          <Box key="actions" flexDirection="row" marginTop={1}>
+          {ended && one.result && !compact ? <Box key="result" flexDirection="column" marginTop={1}><Text mono dimColor>Result</Text><Text mono>{clip(one.result, DETAIL_TEXT_MAX)}</Text></Box> : null}
+          <Box key="actions" flexDirection="row" marginTop={compact ? 0 : 1}>
             <Button
               key="open"
               plain
               label="Open transcript"
+              hotkey="o"
               onPress={() => {
                 void $.ui.view({ agentId: one.id }).then(r => { if (r && 'deny' in r && r.deny) $.ui.toast(`horizon: ${r.deny}`) })
               }}
             />
             {ended ? null : (
               <Box key="stop-box" marginLeft={2}>
-                <Button key="stop" plain label={armed ? '■ Stop? press again' : '■ Stop'} onPress={() => { void pressStop($, one.id) }} />
+                <Button key="stop" plain hotkey="s" label={armed ? '■ Stop? press again' : '■ Stop'} onPress={() => { void pressStop($, one.id) }} />
               </Box>
             )}
           </Box>
@@ -282,6 +279,54 @@ export function registerAgents(on: On) {
     }
     const live = (r: Rec): boolean => !isEnded(r) || (kids.get(r.id) ?? []).some(live)
     const rows: RenderChildren[] = []
+
+    // ---- Compact list: one line an agent, the finished ones folded into one line, no timeline. ----
+    if (compact) {
+      let shown = 0
+      let hidden = 0
+      const line = (r: Rec, depth: number, dim: boolean) => {
+        if (shown >= ROWS_MAX) { hidden++; return }
+        shown++
+        const kind = kindOf(r)
+        const ended = isEnded(r)
+        const pad = '  '.repeat(depth)
+        const right = age(r)
+        const mid = ended ? (kind === 'failed' ? '✗' : '✓') : r.current ? r.current.text : r.label
+        // Never wrap: the glyph, the name, then the tool, within what the age on the right leaves.
+        const room = Math.max(8, columns - pad.length - right.length - 4)
+        const name = clip(`${r.type}(${r.name})`, mid ? Math.max(8, Math.min(room, NAME_MAX + r.type.length)) : room)
+        const tool = mid ? clip(mid, Math.max(0, room - name.length - 2)) : ''
+        const gap = ' '.repeat(Math.max(1, columns - pad.length - 2 - name.length - (tool ? tool.length + 2 : 0) - right.length))
+        rows.push(
+          <Button key={`row:${r.id}`} plain onPress={go(r.id)}>
+            <Text mono wrap="truncate-end">{pad}</Text>
+            {dot(r, 'd', dim)}
+            <Text mono bold={!dim} dimColor={dim} wrap="truncate-end"> {name}</Text>
+            {tool ? <Text mono dimColor wrap="truncate-end">  {tool}</Text> : null}
+            <Text mono dimColor>{gap}{right}</Text>
+          </Button>,
+        )
+        for (const c of kids.get(r.id) ?? []) line(c, depth + 1, dim)
+      }
+      for (const r of roots.filter(live)) line(r, 0, false)
+      const finished = roots.filter(r => !live(r))
+      if (finished.length) {
+        rows.push(
+          <Button key="done-toggle" plain onPress={() => { void update($, view, s => ({ ...s, doneOpen: !s.doneOpen })) }}>
+            <Text mono dimColor>{v.doneOpen ? '▾' : '▸'} Done ({done})</Text>
+          </Button>,
+        )
+        if (v.doneOpen) for (const r of finished) line(r, 0, true)
+      }
+      return (
+        <Box flexDirection="column">
+          {header(<Text key="title" mono bold color="claude">✻ Agents</Text>)}
+          {recs.length === 0 ? <Text key="none" mono dimColor>No agents yet</Text> : null}
+          {rows}
+          {hidden ? <Text key="more" mono dimColor>+{hidden} more</Text> : null}
+        </Box>
+      )
+    }
     const draw = (r: Rec, depth: number, dim: boolean) => {
       const pad = '  '.repeat(depth)
       const kind = kindOf(r)
