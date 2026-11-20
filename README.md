@@ -42,7 +42,13 @@ The card opens by itself when the cache goes cold. In the terminal, click a butt
 
 ## Agents sidebar
 
-Click the agents segment, or run `/horizon agents`, to open the sidebar. In the terminal you can also focus the band (ctrl+x tab) and press `a`. In the desktop app, and in the terminal's fullscreen layout from 110 columns, it docks on the right with the full layout (tree, Done group, timeline, detail page). Elsewhere in the terminal (main screen, tmux, narrower windows) it sits above the prompt in a compact form: one line per agent, finished agents folded into one `Done (N)` line, no timeline. It is a live list of every subagent this session:
+![The Agents sidebar docked beside the transcript in the terminal](assets/horizon-agents-docked.png)
+
+Click the agents segment, or run `/horizon agents`, to open the sidebar. In the terminal you can also focus the band (ctrl+x tab) and press `a`. In the desktop app, and in the terminal's fullscreen layout from 110 columns, it docks on the right with the full layout (tree, Done group, timeline, detail page). Elsewhere in the terminal (main screen, tmux, narrower windows) it sits above the prompt in a compact form: one line per agent, finished agents folded into one `Done (N)` line, no timeline.
+
+![The compact form above the prompt](assets/horizon-agents-compact.png)
+
+It is a live list of every subagent this session:
 
 - nested under the agent that started it, with `⎿`
 - each running agent's current tool call, model and elapsed time
@@ -50,6 +56,8 @@ Click the agents segment, or run `/horizon agents`, to open the sidebar. In the 
 - a timeline with one lane per agent (full layout only)
 
 Click a row for its detail page: the task, its to-dos, recent tool calls and the result. From there, **Open transcript** opens the agent's transcript, and **■ Stop** stops a running agent (press it twice). Hotkeys there: `b` back, `o` open transcript, `s` stop (press twice). Click again, ×, or Esc closes the sidebar. The sidebar never opens or closes by itself.
+
+<img src="assets/horizon-agents-detail.png" alt="An agent's detail page in the sidebar" width="560">
 
 The features follow [Apiarius](https://github.com/yusuflkq/apiarius), and the look follows [claude-agentpane](https://github.com/xuanji86/claude-agentpane).
 
