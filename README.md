@@ -28,7 +28,7 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 - **5H / 7D:** Token Weather Usage's bar. It is solid up to the share **used**; the gap to the time elapsed is dashed, in the bar's color when you are using faster than time passes and grey when you have margin. Green means behind the clock, amber ahead of it, red well ahead (15 points) or past 90% used. Then the time to reset, and where the pace so far ends up: `→ 72% at reset`, or `⚠ out in 58m` / `⚠ out Sun night` when it would run out before the reset.
 - **Cache:** `WARM` with the time left and what the next message costs. Under 10 minutes it turns yellow and shows what is at stake. `COLD` appears once the 1-hour warm period is over, with how long you have been idle and the price of rewriting the cache. `♨` shows a keepwarm window: green while the pings left in it cost less than one cold rewrite, amber `♨≥` once they cost as much or more. With keepwarm off, a dim `♨` appears in the last 10 minutes, green when a 6-hour window would pay for itself. `✎ note` shows a handoff note is ready; once your next message puts it out of date, a dim `✎` stays for the rest of the session to say one was written (`/handoff show` still prints it).
 - **Cost:** the session cost, what the last prompt added, and the 5-hour points it used. On a subscription these are API-price equivalents, not a bill.
-- **Agents:** the subagents running now and how many have run in total. Hover over it to see their names (or the last ones that ran) laid over the same spot; nothing else moves. Hover needs a pointer: the desktop app, or a terminal that reports the mouse.
+- **Agents:** the segment shows running and total agents (`⚙ 2 running · 7`). Click it to open the Agents sidebar on the right (desktop app only; in the terminal a click shows a note saying so). Click again, ×, or Esc to close it.
 
 **Show / Hide** (hotkey `w`) opens a card with:
 
@@ -39,6 +39,19 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 - the guard mode and the cold writes paid this session
 
 The card opens by itself when the cache goes cold. In the terminal, click a button, or focus the band with ctrl+x tab and use its hotkey.
+
+## Agents sidebar
+
+Click the agents segment, or run `/horizon agents`, to open the sidebar on the right (desktop app only). It is a live list of every subagent this session:
+
+- nested under the agent that started it, with `⎿`
+- each running agent's current tool call, model and elapsed time
+- finished agents kept under a dim `Done (N)` group
+- a timeline with one lane per agent
+
+Click a row for its detail page: the task, its to-dos, recent tool calls and the result. From there, **Open transcript** opens the agent's transcript, and **■ Stop** stops a running agent (press it twice). The sidebar never opens or closes by itself.
+
+The features follow [Apiarius](https://github.com/yusuflkq/apiarius), and the look follows [claude-agentpane](https://github.com/xuanji86/claude-agentpane).
 
 ## When the cache goes cold
 
@@ -57,6 +70,7 @@ After 50 idle minutes, while the cache is still warm, the mod forks the conversa
     /keepwarm always        every session, until 6 hours after its last turn
     /keepwarm status | off
     /horizon                the cache card as text
+    /horizon agents         open the Agents sidebar
     /horizon guard warn     show the price and send, never hold
     /horizon guard refuse   hold a cold send once (default)
     /horizon handoff on|off
@@ -72,7 +86,7 @@ If Ribbon, Token Weather Usage or Cache Tax is also installed, you get two bands
 
 ## Credits and license
 
-Apache-2.0; see `LICENSE` and `NOTICE`. Based on [Token Weather Usage](https://github.com/augiefra/claude-mods) by Eric Cologni (Apache-2.0), [Cache Tax](https://github.com/karanb192/cache-tax) by Karan Bansal (MIT) and [ribbon](https://github.com/robonuggets/ribbon) by Jay E / RoboNuggets (MIT). Prices come from Cache Tax's list-price table in `hooks/keepwarm.ts`; edit `PRICES` there when they change.
+Apache-2.0; see `LICENSE` and `NOTICE`. Based on [Token Weather Usage](https://github.com/augiefra/claude-mods) by Eric Cologni (Apache-2.0), [Cache Tax](https://github.com/karanb192/cache-tax) by Karan Bansal (MIT) and [ribbon](https://github.com/robonuggets/ribbon) by Jay E / RoboNuggets (MIT). The Agents sidebar's features come from [Apiarius](https://github.com/yusuflkq/apiarius) by yusuflkq (MIT), and its look from [claude-agentpane](https://github.com/xuanji86/claude-agentpane) by xuanji86 (MIT). Prices come from Cache Tax's list-price table in `hooks/keepwarm.ts`; edit `PRICES` there when they change.
 
 ## Develop
 

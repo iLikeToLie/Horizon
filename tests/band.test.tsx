@@ -228,7 +228,7 @@ test('/handoff now on a cold cache shows the re-write price first, and the secon
   expect(card).toContain('state       warm')
 })
 
-test('agent names appear only on hover, laid over the agents segment', async ($, on) => {
+test('the agents segment counts running and total agents and has no hover overlay; the sidebar is tested in agents.test.tsx', async ($, on) => {
   const clock = mock.clock(on, { now: NOW })
   let done = false
   world(on, {
@@ -238,20 +238,17 @@ test('agent names appear only on hover, laid over the agents segment', async ($,
   await $.turn.complete(turn())
   await clock.advance(MIN)
   let band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
-  expect(textOf(await band.find({ key: 'agents' }))).toContain('2 running')
-  // The segment is the hover scope; the names sit in it hidden, absolutely placed, shown while it is hovered.
   let seg = textOf(await band.find({ key: 'agents' }))
-  expect(seg).toContain('"position":"absolute"')
-  expect(seg).toContain('"display":"none"')
-  expect(seg).toContain('"hover":{"display":"flex"}')
-  expect(seg).toContain('code-reviewer, Explore')
+  expect(seg).toContain('2 running')
+  expect(seg).not.toContain('hover')
+  expect(seg).not.toContain('code-reviewer')
+  expect((await band.find({ key: 'horizon-agents' }))).toBeDefined()
   await band.unmount()
-  // Once none runs, the hover names the last ones that ran.
   done = true
   await clock.advance(MIN)
   band = await $.ui.mount({ plugin: 'horizon', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
   seg = textOf(await band.find({ key: 'agents' }))
-  expect(seg).toContain('ran: code-reviewer, Explore')
+  expect(seg).toContain('2 agents')
   await band.unmount()
 })
 

@@ -5,7 +5,7 @@
     {
       "name": "horizon",
       "source": "./",
-      "description": "One band above the prompt: context weather, 5h/7d usage left, prompt cache warm or cold with its price, session cost and agents; a cold-send guard, keepwarm and a handoff note."
+      "description": "One band above the prompt: context weather, 5h/7d usage left, prompt cache warm or cold with its price, session cost and agents (with an agents sidebar); a cold-send guard, keepwarm and a handoff note."
     }
   ]
 }
