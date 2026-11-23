@@ -257,14 +257,12 @@ export function registerAgents(on: On) {
     const age = (r: Rec) => elapsed((r.endTime ?? now) - r.startTime)
     const dot = (r: Rec, key: string, dim = false) => <Text key={key} color={HUE[kindOf(r)]} dimColor={dim}>⏺</Text>
 
-    const closeButton = <Button key="close" plain role="dismiss" label="×" onPress={() => { stopLive(); void $.ui.close({ id: PANE }) }} />
     const header = (left: RenderChildren) => (
       <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
         {left}
         {compact ? null : <Box flexGrow={1} />}
-        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done{compact ? '' : ' '}</Text>
+        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done</Text>
         {compact ? <Box flexGrow={1} /> : null}
-        {closeButton}
       </Box>
     )
     const go = (detail: string | null) => () => { void update($, view, s => ({ ...s, detail, armed: null })) }
@@ -284,7 +282,7 @@ export function registerAgents(on: On) {
           {header(<Button key="back" plain label="◂ Agents" hotkey="b" onPress={go(null)} />)}
           <Box key="title" flexDirection="row">
             {dot(one, 'd')}
-            <Text key="n" mono bold wrap="truncate-end"> {one.type}({clip(one.name, compact ? Math.max(8, columns - one.type.length - 4) : NAME_MAX)})</Text>
+            <Text key="n" mono bold wrap="truncate-end"> {one.type}({clip(one.name, Math.max(8, columns - one.type.length - 4))})</Text>
           </Box>
           <Text key="state" mono color={HUE[kind]}>{state} <Text dimColor>{age(one)}</Text></Text>
           <Text key="facts" mono dimColor wrap="truncate-end">{facts}</Text>
@@ -390,13 +388,17 @@ export function registerAgents(on: On) {
       const kind = kindOf(r)
       const ended = isEnded(r)
       const status = kind === 'running' ? '✶ Running…' : kind === 'waiting' ? '◐ Waiting' : kind === 'failed' ? '✗' : '✓'
+      // One line a row: the name gets what the glyph, the status and the age leave, never more than NAME_MAX of it.
+      const right = age(r)
+      const room = Math.max(8, columns - pad.length - 2 - 2 - status.length - 1 - right.length)
+      const name = clip(`${r.type}(${clip(r.name, NAME_MAX)})`, room)
       rows.push(
         <Button key={`row:${r.id}`} plain onPress={go(r.id)}>
           <Text mono>{pad}</Text>
           {dot(r, 'd', dim)}
-          <Text mono bold={!dim} dimColor={dim}> {r.type}({clip(r.name, NAME_MAX)})  </Text>
+          <Text mono bold={!dim} dimColor={dim} wrap="truncate-end"> {name}  </Text>
           <Text mono color={HUE[kind]} dimColor={dim && !ended}>{status} </Text>
-          <Text mono dimColor>{age(r)}</Text>
+          <Text mono dimColor>{right}</Text>
         </Button>,
       )
       const detail = r.current ? r.current.text : ended ? '' : r.label

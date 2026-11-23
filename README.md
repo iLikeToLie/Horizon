@@ -28,7 +28,7 @@ Answer `y` to add the marketplace, pick the **user** scope, then start a new ses
 - **5H / 7D:** Token Weather Usage's bar. It is solid up to the share **used**; the gap to the time elapsed is dashed, in the bar's color when you are using faster than time passes and grey when you have margin. Green means behind the clock, amber ahead of it, red well ahead (15 points) or past 90% used. Then the time to reset, and where the pace so far ends up: `→ 72% at reset`, or `⚠ out in 58m` / `⚠ out Sun night` when it would run out before the reset.
 - **Cache:** `WARM` with the time left and what the next message costs. Under 10 minutes it turns yellow and shows what is at stake. `COLD` appears once the 1-hour warm period is over, with how long you have been idle and the price of rewriting the cache. `♨` shows a keepwarm window: green while the pings left in it cost less than one cold rewrite, amber `♨≥` once they cost as much or more. With keepwarm off, a dim `♨` appears in the last 10 minutes, green when a 6-hour window would pay for itself. `✎ note` shows a handoff note is ready; once your next message puts it out of date, a dim `✎` stays for the rest of the session to say one was written (`/handoff show` still prints it).
 - **Cost:** the session cost, what the last prompt added, and the 5-hour points it used. On a subscription these are API-price equivalents, not a bill.
-- **Agents:** the segment shows running and total agents (`⚙ 2 running · 7`). Click it to open the Agents sidebar. In the terminal you can also focus the band with ctrl+x tab and press `a`. Click again, ×, or Esc to close it.
+- **Agents:** the segment shows running and total agents (`⚙ 2 running · 7`). Click it to open the Agents sidebar. In the terminal you can also focus the band with ctrl+x tab and press `a`. Click again, the pane's ✕, or Esc to close it.
 
 **Show / Hide** (hotkey `w`) opens a card with:
 
@@ -55,7 +55,7 @@ It is a live list of every subagent this session:
 - finished agents kept under a dim `Done (N)` group
 - a timeline with one lane per agent (full layout only)
 
-Click a row for its detail page: the task, its to-dos, recent tool calls and the result. From there, **Open transcript** opens the agent's transcript, and **■ Stop** stops a running agent (press it twice). Hotkeys there: `b` back, `o` open transcript, `s` stop (press twice). Click again, ×, or Esc closes the sidebar. The sidebar never opens or closes by itself.
+Click a row for its detail page: the task, its to-dos, recent tool calls and the result. From there, **Open transcript** opens the agent's transcript, and **■ Stop** stops a running agent (press it twice). Hotkeys there: `b` back, `o` open transcript, `s` stop (press twice). Click again, the pane's ✕, or Esc closes the sidebar. The sidebar never opens or closes by itself.
 
 <img src="assets/horizon-agents-detail.png" alt="An agent's detail page in the sidebar" width="560">
 

@@ -454,3 +454,17 @@ test('the beat stops once the pane is closed', async ($, on) => {
   await clock.advance(20_000)
   expect(seen.panesAsked).toBe(asked)
 })
+
+test('in a narrow dock a long agent name is cut to one line, and the header leaves closing to the frame', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [agent('c1', 'Codex: implement Open Waters recorder', 'codex:codex-rescue', 'running')])
+  await start($, clock, 'desktop')
+  const columns = 44
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: columns } })
+  const label = String((await ui.find({ key: 'row:c1' }))?.props.label)
+  expect(label).toContain('…')
+  expect(label).toContain('Running…')
+  expect(label.length).toBeLessThanOrEqual(columns)
+  expect(await ui.find({ key: 'close' })).toBeUndefined()
+  await ui.unmount()
+})
