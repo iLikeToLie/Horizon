@@ -6,7 +6,7 @@ import {
   AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
-import { noteAnswer, refreshRoster, registerAgents, resetAgents, toggleAgents } from './agents'
+import { noteAnswer, refreshRoster, registerAgents, resetAgents, stopLive, toggleAgents } from './agents'
 import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
 import type { Cell, Gauge } from './weather'
 
@@ -176,7 +176,10 @@ export const register: Register = on => {
     // Only the conversation this state sits in: after the classic start of the next one, the old id is history.
     if ((e.reason === 'clear' || e.reason === 'resume') && e.sessionId === s.sid) await endConversation($, s, e.reason)
     // A real end; /clear and /resume keep the ticker.
-    if (e.reason === 'prompt_input_exit' || e.reason === 'other' || e.reason === 'logout') ticker?.cancel()
+    if (e.reason === 'prompt_input_exit' || e.reason === 'other' || e.reason === 'logout') {
+      ticker?.cancel()
+      stopLive()
+    }
     return next(e)
   })
 

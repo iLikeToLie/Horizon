@@ -24,8 +24,8 @@ const agent = (id: string, description: string, type: string, status: AgentInfo[
 function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: string } | { result: object }; unplaced?: string } = {}) {
   mock.store(on)
   const gate = { wait: null as Promise<void> | null }
-  const seen = { gate, toasts: [] as string[], opened: [] as string[], closed: [] as string[], stopped: [] as string[], viewed: [] as Array<string | undefined>, logs: [] as string[] }
   const up = new Set<string>()
+  const seen = { gate, toasts: [] as string[], opened: [] as string[], closed: [] as string[], stopped: [] as string[], viewed: [] as Array<string | undefined>, logs: [] as string[], panesAsked: 0, up }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('session.end', ($, e) => ({ sessionId: e.sessionId }))
   on('session.id', () => ({ value: 'S1' }))
@@ -39,7 +39,7 @@ function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: str
   on('ui.log', ($, e) => { seen.logs.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { seen.toasts.push(e.text); return { value: undefined } })
-  on('ui.panes', () => ({ value: [...up].map(id => ({ id, title: 'Agents', isShown: true, isFocused: false, isPlaced: true })) }))
+  on('ui.panes', () => { seen.panesAsked++; return { value: [...up].map(id => ({ id, title: 'Agents', isShown: true, isFocused: false, isPlaced: true })) } })
   on('ui.open', ($, e) => {
     seen.opened.push(e.id)
     if (opts.unplaced) return { value: { isPlaced: false as const, reason: opts.unplaced } }
@@ -409,5 +409,62 @@ test('idle agents get their own count in the header', async ($, on) => {
   await start($, clock, 'desktop')
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   expect(textOf(await ui.find({ type: 'Box' }))).toContain('2 running · 1 idle · 1 done')
+  await ui.unmount()
+})
+
+test('the open pane keeps its clocks running without a tool call', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  await $.command.run(command('agents'))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const age = async () => textOf(await ui.find({ key: 'row:a1' })).match(/Running… (\d+m\d+s)/)?.[1]
+  const before = await age()
+  await clock.advance(3000)
+  const after = await age()
+  expect(before).toBe('4m00s')
+  expect(after).toBe('4m03s')
+  await ui.unmount()
+})
+
+test('the open pane picks up a new agent within a few seconds, with no tool call to prompt it', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  let list = ROSTER()
+  world(on, () => list)
+  await start($, clock, 'desktop')
+  await $.command.run(command('agents'))
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ key: 'row:a9' })).toBeUndefined()
+  list = [...list, agent('a9', 'late starter', 'Explore', 'running', { startTime: NOW + MIN })]
+  await clock.advance(5000)
+  expect(await ui.find({ key: 'row:a9' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the beat stops once the pane is closed', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  const seen = world(on, ROSTER)
+  await start($, clock, 'desktop')
+  await $.command.run(command('agents'))
+  await clock.advance(5000)
+  // Closed by the person (Esc or the frame's ✕), not by our toggle: the next sync sees it gone and stops.
+  seen.up.delete('horizon-agents')
+  await clock.advance(5000)
+  const asked = seen.panesAsked
+  await clock.advance(20_000)
+  expect(seen.panesAsked).toBe(asked)
+})
+
+test('in a narrow dock a long agent name is cut to one line, and the header leaves closing to the frame', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, () => [agent('c1', 'Codex: implement Open Waters recorder', 'codex:codex-rescue', 'running')])
+  await start($, clock, 'desktop')
+  const columns = 44
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: columns } })
+  const label = String((await ui.find({ key: 'row:c1' }))?.props.label)
+  expect(label).toContain('…')
+  expect(label).toContain('Running…')
+  expect(label.length).toBeLessThanOrEqual(columns)
+  expect(await ui.find({ key: 'close' })).toBeUndefined()
   await ui.unmount()
 })

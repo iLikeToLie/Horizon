@@ -18,6 +18,10 @@ const COMPACT_CALLS = 5
 const ROWS_MAX = 8
 const NAME_MAX = 40
 const DETAIL_TEXT_MAX = 700
+// While the pane is open: a redraw a second so the clocks run, and the engine's list read every few beats so agents
+// that start, end or stop show without waiting for a tool call.
+const BEAT_MS = 1000
+const SYNC_BEATS = 5
 
 const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null, doneOpen: false } as AgentsView)
 
@@ -53,6 +57,37 @@ const prompts = new Map<string, string[]>()
 export function resetAgents() {
   roster.clear()
   prompts.clear()
+}
+
+let live: { cancel: () => void } | null = null
+let beats = 0
+
+/** Starts the pane's beat, once; it stops itself when the pane is gone. */
+function startLive($: EngineInterface) {
+  if (live) return
+  beats = 0
+  live = $.clock.every(BEAT_MS, () => { void beat($) })
+}
+
+export function stopLive() {
+  live?.cancel()
+  live = null
+}
+
+async function beat($: EngineInterface) {
+  beats++
+  if (beats % SYNC_BEATS === 0) {
+    try {
+      if (!(await $.ui.panes()).some(p => p.id === PANE)) return stopLive()
+      await refreshRoster($)
+    } catch {
+      // A failed read keeps the last list; the next sync tries again.
+    }
+    $.ui.invalidate('ui.render')
+    return
+  }
+  // Only a running clock needs the redraw in between.
+  if ([...roster.values()].some(r => !isEnded(r))) $.ui.invalidate('ui.render')
 }
 
 type Kind = 'running' | 'waiting' | 'done' | 'failed'
@@ -151,6 +186,7 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
     const up = (await $.ui.panes()).some(p => p.id === PANE)
     if (up && only === 'toggle') {
       doing = 'close'
+      stopLive()
       await $.ui.close({ id: PANE })
       return { state: 'closed' }
     }
@@ -159,6 +195,7 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
       $.ui.log(`horizon: the agents sidebar could not be placed (${opened.reason})`)
       return { state: 'failed', reason: String(opened.reason) }
     }
+    startLive($)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     $.ui.log(`horizon: could not ${doing} the agents sidebar (${reason})`)
@@ -203,6 +240,8 @@ export function registerAgents(on: On) {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
+    // A pane drawn without our toggle (restored, or opened before a reload) gets its beat too.
+    startLive($)
     const now = await $.clock.now()
     const columns = e.props.bodyColumns
     // The dock (a desktop side pane, the terminal's fullscreen layout beside the transcript) has the room for the full form;
@@ -218,14 +257,12 @@ export function registerAgents(on: On) {
     const age = (r: Rec) => elapsed((r.endTime ?? now) - r.startTime)
     const dot = (r: Rec, key: string, dim = false) => <Text key={key} color={HUE[kindOf(r)]} dimColor={dim}>⏺</Text>
 
-    const closeButton = <Button key="close" plain role="dismiss" label="×" onPress={() => { void $.ui.close({ id: PANE }) }} />
     const header = (left: RenderChildren) => (
       <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
         {left}
         {compact ? null : <Box flexGrow={1} />}
-        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done{compact ? '' : ' '}</Text>
+        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done</Text>
         {compact ? <Box flexGrow={1} /> : null}
-        {closeButton}
       </Box>
     )
     const go = (detail: string | null) => () => { void update($, view, s => ({ ...s, detail, armed: null })) }
@@ -245,7 +282,7 @@ export function registerAgents(on: On) {
           {header(<Button key="back" plain label="◂ Agents" hotkey="b" onPress={go(null)} />)}
           <Box key="title" flexDirection="row">
             {dot(one, 'd')}
-            <Text key="n" mono bold wrap="truncate-end"> {one.type}({clip(one.name, compact ? Math.max(8, columns - one.type.length - 4) : NAME_MAX)})</Text>
+            <Text key="n" mono bold wrap="truncate-end"> {one.type}({clip(one.name, Math.max(8, columns - one.type.length - 4))})</Text>
           </Box>
           <Text key="state" mono color={HUE[kind]}>{state} <Text dimColor>{age(one)}</Text></Text>
           <Text key="facts" mono dimColor wrap="truncate-end">{facts}</Text>
@@ -351,13 +388,17 @@ export function registerAgents(on: On) {
       const kind = kindOf(r)
       const ended = isEnded(r)
       const status = kind === 'running' ? '✶ Running…' : kind === 'waiting' ? '◐ Waiting' : kind === 'failed' ? '✗' : '✓'
+      // One line a row: the name gets what the glyph, the status and the age leave, never more than NAME_MAX of it.
+      const right = age(r)
+      const room = Math.max(8, columns - pad.length - 2 - 2 - status.length - 1 - right.length)
+      const name = clip(`${r.type}(${clip(r.name, NAME_MAX)})`, room)
       rows.push(
         <Button key={`row:${r.id}`} plain onPress={go(r.id)}>
           <Text mono>{pad}</Text>
           {dot(r, 'd', dim)}
-          <Text mono bold={!dim} dimColor={dim}> {r.type}({clip(r.name, NAME_MAX)})  </Text>
+          <Text mono bold={!dim} dimColor={dim} wrap="truncate-end"> {name}  </Text>
           <Text mono color={HUE[kind]} dimColor={dim && !ended}>{status} </Text>
-          <Text mono dimColor>{age(r)}</Text>
+          <Text mono dimColor>{right}</Text>
         </Button>,
       )
       const detail = r.current ? r.current.text : ended ? '' : r.label
