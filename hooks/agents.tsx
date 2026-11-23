@@ -18,6 +18,10 @@ const COMPACT_CALLS = 5
 const ROWS_MAX = 8
 const NAME_MAX = 40
 const DETAIL_TEXT_MAX = 700
+// While the pane is open: a redraw a second so the clocks run, and the engine's list read every few beats so agents
+// that start, end or stop show without waiting for a tool call.
+const BEAT_MS = 1000
+const SYNC_BEATS = 5
 
 const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null, doneOpen: false } as AgentsView)
 
@@ -53,6 +57,37 @@ const prompts = new Map<string, string[]>()
 export function resetAgents() {
   roster.clear()
   prompts.clear()
+}
+
+let live: { cancel: () => void } | null = null
+let beats = 0
+
+/** Starts the pane's beat, once; it stops itself when the pane is gone. */
+function startLive($: EngineInterface) {
+  if (live) return
+  beats = 0
+  live = $.clock.every(BEAT_MS, () => { void beat($) })
+}
+
+export function stopLive() {
+  live?.cancel()
+  live = null
+}
+
+async function beat($: EngineInterface) {
+  beats++
+  if (beats % SYNC_BEATS === 0) {
+    try {
+      if (!(await $.ui.panes()).some(p => p.id === PANE)) return stopLive()
+      await refreshRoster($)
+    } catch {
+      // A failed read keeps the last list; the next sync tries again.
+    }
+    $.ui.invalidate('ui.render')
+    return
+  }
+  // Only a running clock needs the redraw in between.
+  if ([...roster.values()].some(r => !isEnded(r))) $.ui.invalidate('ui.render')
 }
 
 type Kind = 'running' | 'waiting' | 'done' | 'failed'
@@ -151,6 +186,7 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
     const up = (await $.ui.panes()).some(p => p.id === PANE)
     if (up && only === 'toggle') {
       doing = 'close'
+      stopLive()
       await $.ui.close({ id: PANE })
       return { state: 'closed' }
     }
@@ -159,6 +195,7 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
       $.ui.log(`horizon: the agents sidebar could not be placed (${opened.reason})`)
       return { state: 'failed', reason: String(opened.reason) }
     }
+    startLive($)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     $.ui.log(`horizon: could not ${doing} the agents sidebar (${reason})`)
@@ -203,6 +240,8 @@ export function registerAgents(on: On) {
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
+    // A pane drawn without our toggle (restored, or opened before a reload) gets its beat too.
+    startLive($)
     const now = await $.clock.now()
     const columns = e.props.bodyColumns
     // The dock (a desktop side pane, the terminal's fullscreen layout beside the transcript) has the room for the full form;
@@ -218,7 +257,7 @@ export function registerAgents(on: On) {
     const age = (r: Rec) => elapsed((r.endTime ?? now) - r.startTime)
     const dot = (r: Rec, key: string, dim = false) => <Text key={key} color={HUE[kindOf(r)]} dimColor={dim}>⏺</Text>
 
-    const closeButton = <Button key="close" plain role="dismiss" label="×" onPress={() => { void $.ui.close({ id: PANE }) }} />
+    const closeButton = <Button key="close" plain role="dismiss" label="×" onPress={() => { stopLive(); void $.ui.close({ id: PANE }) }} />
     const header = (left: RenderChildren) => (
       <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
         {left}
