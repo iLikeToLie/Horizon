@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { AgentInfo, On, RenderPropsOf } from 'claude-code'
-import { clip } from '../hooks/agents'
+import { clip, groupOf, tallyCalls } from '../hooks/agents'
+import type { Entry } from '../hooks/agents'
 
 const MIN = 60_000
 const NOW = Date.parse('2099-01-03T12:00:00Z')
@@ -36,6 +37,10 @@ function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: str
   on('command.list', () => ({ value: [] }))
   on('classic.SessionStart', () => ({}))
   on('turn.complete', ($, e) => ({ text: e.answer }))
+  on('turn.step', async function* ($, e) {
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [] }
+  })
+  on('session.compact', () => ({ messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }], tokensAfter: 1000 }))
   on('ui.log', ($, e) => { seen.logs.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', ($, e) => { seen.toasts.push(e.text); return { value: undefined } })
@@ -55,6 +60,7 @@ function world(on: On, list: () => AgentInfo[], opts: { stop?: () => { deny: str
   on('tool.call', async ($, e) => {
     await gate.wait
     if (e.tool === 'Bash' && e.command === 'explode') throw new Error('boom')
+    if (e.tool === 'Edit' && e.file_path === 'denied') return { deny: 'no' }
     if (e.tool !== 'TaskStop') return { result: {} }
     seen.stopped.push(String(e.task_id))
     return opts.stop?.() ?? { result: {} }
@@ -466,5 +472,92 @@ test('in a narrow dock a long agent name is cut to one line, and the header leav
   expect(label).toContain('Running…')
   expect(label.length).toBeLessThanOrEqual(columns)
   expect(await ui.find({ key: 'close' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// One request of a turn, the main loop's (no agentId) or an agent's.
+async function step($: Engine, index: number, agentId?: string) {
+  for await (const _ of $.turn.step({ turnId: 't', index, messageCount: 10, model: 'claude-fable-5-1', agentId } as never)) { /* drain */ }
+}
+
+test('calls fold MCP tools by server and skills by name, most used first', () => {
+  expect(groupOf('mcp__github__get_me', {})).toEqual({ group: 'mcp', sub: 'github' })
+  expect(groupOf('Skill', { skill: 'code-review' })).toEqual({ group: 'skill', sub: 'code-review' })
+  expect(groupOf('Bash', {})).toEqual({ group: 'Bash' })
+  const e = (group: string, state: Entry['state'], sub?: string) => ({ id: 'x', tool: group, group, sub, text: '', at: 0, state })
+  const rows = tallyCalls([e('Read', 'ok'), e('Bash', 'ok'), e('Bash', 'failed'), e('Bash', 'running'), e('mcp', 'ok', 'slack'), e('mcp', 'ok', 'github'), e('mcp', 'ok', 'github')])
+  expect(rows.map(r => r.group)).toEqual(['Bash', 'mcp', 'Read'])
+  expect(rows[0]).toMatchObject({ n: 3, failed: 1, running: 1 })
+  expect(rows[1]?.subs).toEqual(['github', 'slack'])
+})
+
+test('the dock has a calls section for this turn, with failures; t switches to the session and a row opens on its calls', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'terminal')
+  // A call in an earlier turn, then a new turn.
+  await $.tool.call({ tool: 'Read', file_path: 'old.ts' })
+  await clock.advance(1000)
+  await step($, 0)
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await $.tool.call({ tool: 'Bash', command: 'npm test', agentId: 'a1' })
+  await $.tool.call({ tool: 'Edit', file_path: 'a.ts' })
+  await $.tool.call({ tool: 'Edit', file_path: 'denied' })
+  await $.tool.call({ tool: 'Skill', skill: 'code-review' })
+  await $.tool.call({ tool: 'mcp__github__get_me' })
+  await $.tool.call({ tool: 'Bash', command: 'explode' }).catch(() => {})
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  let all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('── calls')
+  expect(textOf(await ui.find({ key: 'tool:Bash' }))).toContain('3')
+  expect(textOf(await ui.find({ key: 'tool:Edit' }))).toContain('1 ✗')
+  expect(textOf(await ui.find({ key: 'tool:skill' }))).toContain('code-review')
+  expect(textOf(await ui.find({ key: 'tool:mcp' }))).toContain('github')
+  // This turn only: the earlier Read is not counted.
+  expect(await ui.find({ key: 'tool:Read' })).toBeUndefined()
+  expect(all).toMatch(/✓ 5 ok.*✗ 2 failed/)
+  // The receipt: one edit, two errors, while the turn runs.
+  expect(all).toMatch(/turn ✶ [^"]*1 edit · 2 errors/)
+  // A row opens on its calls, each with who made it.
+  await ui.press({ key: 'tool:Bash' })
+  all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('npm test')
+  expect(all).toContain('find auth code')
+  expect(all).toContain('main')
+  expect((await ui.find({ key: 'scope' }))?.props.hotkey).toBe('t')
+  await ui.press({ key: 'scope' })
+  expect(textOf(await ui.find({ key: 'tool:Read' }))).toContain('1')
+  await ui.unmount()
+})
+
+test('agent steps show on the row, a compaction shows under Loops, and a skill call marks its agent\'s lane', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  await step($, 0, 'a1')
+  await step($, 1, 'a1')
+  await $.tool.call({ tool: 'Skill', skill: 'simplify', agentId: 'a1' })
+  await $.session.compact({ trigger: 'auto', messages: [{ role: 'user', text: 'a', toolUses: [] }] } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('12k tokens · 2 steps')
+  expect(all).toContain('compaction ⟲')
+  expect(textOf(await ui.find({ key: 'lane:a1' }))).toContain('◆')
+  expect(all).toContain('simplify')
+  await ui.unmount()
+})
+
+test('the turn receipt stops its clock when the turn completes', async ($, on) => {
+  const clock = mock.clock(on, { now: NOW })
+  world(on, ROSTER)
+  await start($, clock, 'desktop')
+  await step($, 0)
+  await clock.advance(90_000)
+  await $.turn.complete({ answer: 'ok', durationMs: 1000, isAborted: false, turnId: 't', reason: 'answer' })
+  await clock.advance(MIN)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const all = textOf(await ui.find({ type: 'Box' }))
+  expect(all).toContain('turn 1m30s')
+  expect(all).not.toContain('turn ✶')
   await ui.unmount()
 })
