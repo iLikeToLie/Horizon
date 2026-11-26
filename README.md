@@ -53,7 +53,16 @@ It is a live list of every subagent this session:
 - nested under the agent that started it, with `⎿`
 - each running agent's current tool call, model and elapsed time
 - finished agents kept under a dim `Done (N)` group
-- a timeline with one lane per agent (full layout only)
+- each agent's model, tokens and steps (its requests so far)
+- a timeline with one lane per agent (full layout only), with a `◆` where a skill was called
+
+The full layout also has:
+
+- **the turn's receipt** under the header: how long the turn has run (`✶` while it runs), the agents it started, its edits, its failed calls and the cost it added: `turn 3m12s · 4 agents · 7 edits · 1 error · +$0.41`
+- **Loops:** model loops with no row of their own, such as compactions (`⟲`) and forks
+- **calls:** one row per tool for every call this turn, the main loop's and the agents', most used first, with a bar and the count. Failed calls (refused, errored or thrown) show as a red `✗ N`, and calls still running as `⧗`. MCP tools share one `mcp` row that names the servers, and skills share one `skill` row that names them. Click a row for its last 5 calls and who made each (`main` or the agent). Press `t` (or click `turn`) to count the whole session instead. The compact form shows the turn's call count and failures in its header.
+
+An agent's detail page lists its calls by tool above its recent calls.
 
 Click a row for its detail page: the task, its to-dos, recent tool calls and the result. From there, **Open transcript** opens the agent's transcript, and **■ Stop** stops a running agent (press it twice). Hotkeys there: `b` back, `o` open transcript, `s` stop (press twice). Click again, the pane's ✕, or Esc closes the sidebar. The sidebar never opens or closes by itself.
 

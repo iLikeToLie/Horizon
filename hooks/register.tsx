@@ -6,7 +6,7 @@ import {
   AUTO_WARM_MS, BIG_TOKENS, DEFAULT_WINDOW_MS, HANDOFF_FROM_MS, KEY_ALWAYS, KEY_GUARD, KEY_HANDOFF, MIN_PING_MS, PING_AFTER_MS, TTL_MS, UNATTENDED, arm, armedText, card, coldUsd, deadlineKey, disarm, endConversation, everyKey, fmtDuration, fmtTok, fmtUsd, freshState, guardText, handoffLine, handoffNow, holdMs, isCold, markCompacted, mayBeCold, maybePrepareHandoff, outdate, parseDuration, ping, priceOf, prune, reseat, seat, seedFromResume, startWindow, statusText, stop, unknownText, updateStatus, warmUsd, windowVerdict,
 } from './keepwarm'
 import type { State } from './keepwarm'
-import { noteAnswer, refreshRoster, registerAgents, resetAgents, stopLive, toggleAgents } from './agents'
+import { noteAnswer, noteCompaction, noteStep, noteTurnEnd, refreshRoster, registerAgents, resetAgents, stopLive, toggleAgents } from './agents'
 import { cellsOf, forecastFor, gaugeOf, lastReading, measureTurn, pushReading, resetWeather, seedWeather, short, sortLimits, sparkline, trend, w } from './weather'
 import type { Cell, Gauge } from './weather'
 
@@ -305,6 +305,8 @@ export const register: Register = on => {
   on('turn.step', async function* ($, e, next) {
     let before = 0
     let stamp = 0
+    // The agents sidebar counts an agent's steps and times the main loop's turn.
+    noteStep(e.agentId, e.index, await $.clock.now())
     if (!e.agentId) {
       await reseat($, s)
       // The off count when the turn's first request went out: an off after it wins over what the turn opens.
@@ -353,6 +355,7 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    if (!e.agentId) noteTurnEnd(await $.clock.now())
     if (e.agentId) {
       noteAnswer(e.agentId, e.answer)
       await refreshRoster($)
@@ -440,6 +443,7 @@ export const register: Register = on => {
 
   on('session.compact', async ($, e, next) => {
     const r = await next(e)
+    if (e.trigger !== 'precompute' && r && typeof r.skip !== 'string') noteCompaction()
     if (!e.agentId) {
       markCompacted(s)
       // Between turns nothing is left to score, and the next turn's summary write is not a cold write.

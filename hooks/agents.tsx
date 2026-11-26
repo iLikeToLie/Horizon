@@ -3,6 +3,7 @@ import type { AgentInfo, EngineInterface, On, RenderChildren } from 'claude-code
 
 import type { AgentsView } from '../types'
 import { refreshAgents, short, w } from './weather'
+import { fmtUsd } from './keepwarm'
 
 // The agents sidebar, a pane on every surface (the desktop's side pane, the terminal's dock or the strip above the prompt) after claude-agentpane's look (dense, one line a row, glyphs,
 // monospace) and Apiarius's core (list, org tree, timeline, detail, stop). The band's agents segment opens it; it never
@@ -22,6 +23,11 @@ const DETAIL_TEXT_MAX = 700
 // that start, end or stop show without waiting for a tool call.
 const BEAT_MS = 1000
 const SYNC_BEATS = 5
+// The calls section: every tool call this session (main loop and agents), newest last, up to LOG_MAX of them.
+const LOG_MAX = 10_000
+const TOOL_ROWS = 10
+const OPEN_CALLS = 5
+const EDITS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
 
 const view = atom({ plugin: 'horizon', key: 'agentsView' } as const, { detail: null, armed: null, doneOpen: false } as AgentsView)
 
@@ -49,6 +55,35 @@ export type Rec = {
   result?: string
 }
 
+/** One tool call, from the main loop or an agent: its row in the calls section is `group` (the tool, or `mcp` / `skill`). */
+export type Entry = {
+  id: string
+  tool: string
+  group: string
+  /** The MCP server, or the skill's name. */
+  sub?: string
+  text: string
+  agentId?: string
+  at: number
+  state: 'running' | 'ok' | 'failed'
+}
+
+/** The tool call's row: MCP tools fold into one `mcp` row and skills into one `skill` row, each naming what it called. */
+export function groupOf(tool: string, input: Record<string, unknown>): { group: string; sub?: string } {
+  if (tool.startsWith('mcp__')) return { group: 'mcp', sub: tool.split('__')[1] || undefined }
+  if (tool === 'Skill') return { group: 'skill', sub: typeof input.skill === 'string' && input.skill ? input.skill : undefined }
+  return { group: tool }
+}
+
+// Every call this session, the main loop's (the turn's receipt and the calls section) as well as the agents'.
+let log: Entry[] = []
+// The main loop's turn: when its first request went out, when it ended (null while it runs), and the session cost then.
+let turn: { start: number; end: number | null; cost0: number | null } | null = null
+// Requests per agent, counted as they go out; kept apart from the roster, which may not have the agent yet.
+const steps = new Map<string, number>()
+// Compactions this session, of the main loop or an agent.
+let compactions = 0
+
 // Every agent seen this session, in the order first seen; one set per loaded module.
 const roster = new Map<string, Rec>()
 // Prompts of Agent calls not yet matched to a spawned agent, by the call's description.
@@ -57,6 +92,34 @@ const prompts = new Map<string, string[]>()
 export function resetAgents() {
   roster.clear()
   prompts.clear()
+  log = []
+  turn = null
+  steps.clear()
+  compactions = 0
+}
+
+/** The calls the section counts: this turn's (from its first request), or the whole session's. */
+export function callsIn(scope: 'turn' | 'session'): Entry[] {
+  if (scope === 'session' || !turn) return log
+  const from = turn.start
+  return log.filter(c => c.at >= from)
+}
+
+export type ToolRow = { group: string; n: number; failed: number; running: number; subs: string[] }
+/** One row a group, most calls first; subs are the MCP servers or skills it names, most used first. */
+export function tallyCalls(calls: readonly Entry[]): ToolRow[] {
+  const rows = new Map<string, ToolRow & { counts: Map<string, number> }>()
+  for (const c of calls) {
+    const row = rows.get(c.group) ?? { group: c.group, n: 0, failed: 0, running: 0, subs: [], counts: new Map() }
+    row.n++
+    if (c.state === 'failed') row.failed++
+    if (c.state === 'running') row.running++
+    if (c.sub) row.counts.set(c.sub, (row.counts.get(c.sub) ?? 0) + 1)
+    rows.set(c.group, row)
+  }
+  return [...rows.values()]
+    .map(({ counts, ...r }) => ({ ...r, subs: [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k) }))
+    .sort((a, b) => b.n - a.n || a.group.localeCompare(b.group))
 }
 
 let live: { cancel: () => void } | null = null
@@ -87,7 +150,7 @@ async function beat($: EngineInterface) {
     return
   }
   // Only a running clock needs the redraw in between.
-  if ([...roster.values()].some(r => !isEnded(r))) $.ui.invalidate('ui.render')
+  if ((turn && turn.end === null) || [...roster.values()].some(r => !isEnded(r))) $.ui.invalidate('ui.render')
 }
 
 type Kind = 'running' | 'waiting' | 'done' | 'failed'
@@ -204,6 +267,22 @@ export async function toggleAgents($: EngineInterface, only: 'open' | 'toggle' =
   return { state: 'opened' }
 }
 
+/** A request goes out: an agent's is one of its steps; the main loop's first starts the turn the receipt reads, at the session cost then. */
+export function noteStep(agentId: string | undefined, index: number, now: number) {
+  if (agentId) steps.set(agentId, (steps.get(agentId) ?? 0) + 1)
+  else if (index === 0) turn = { start: now, end: null, cost0: w.cost }
+}
+
+/** The main loop's turn ended. */
+export function noteTurnEnd(now: number) {
+  if (turn && turn.end === null) turn.end = now
+}
+
+/** A compaction, of the main loop or an agent: one of the loops with no card. */
+export function noteCompaction() {
+  compactions++
+}
+
 /** An agent's turn ends with its answer: the result the detail shows. */
 export function noteAnswer(agentId: string | undefined, answer: unknown) {
   const rec = agentId ? roster.get(agentId) : undefined
@@ -219,21 +298,35 @@ export function registerAgents(on: On) {
       queue.push(input.prompt)
       prompts.set(input.description, queue.slice(-5))
     }
+    const text = describeCall(input)
+    // Every call goes in the log, the main loop's too: the calls section and the receipt count them.
+    const entry: Entry = { id: input.tool_use_id, tool: input.tool, ...groupOf(input.tool, input), text, agentId: input.agentId, at: await $.clock.now(), state: 'running' }
+    log.push(entry)
+    if (log.length > LOG_MAX) log = log.slice(-LOG_MAX)
     const rec = input.agentId ? roster.get(input.agentId) : undefined
-    if (!rec) return next(e)
-    const call: Call = { id: input.tool_use_id, tool: input.tool, text: describeCall(input) }
-    rec.busy.push(call)
-    rec.current = call
-    rec.calls.push(call)
-    if (rec.calls.length > CALLS_KEPT) rec.calls = rec.calls.slice(-CALLS_KEPT)
-    if (input.tool === 'TodoWrite' && Array.isArray(input.todos)) rec.todos = input.todos as Todo[]
+    const call: Call = { id: input.tool_use_id, tool: input.tool, text }
+    if (rec) {
+      rec.busy.push(call)
+      rec.current = call
+      rec.calls.push(call)
+      if (rec.calls.length > CALLS_KEPT) rec.calls = rec.calls.slice(-CALLS_KEPT)
+      if (input.tool === 'TodoWrite' && Array.isArray(input.todos)) rec.todos = input.todos as Todo[]
+    }
     $.ui.invalidate('ui.render')
     try {
-      return await next(e)
+      const r = await next(e)
+      // A refusal, or an answer the tool marked as an error, is a failed call.
+      entry.state = (r && 'deny' in r && r.deny !== undefined) || r?.isError ? 'failed' : 'ok'
+      return r
+    } catch (err) {
+      entry.state = 'failed'
+      throw err
     } finally {
       // Whether it answered or threw: off the busy list, and the line shows the newest call still running.
-      rec.busy = rec.busy.filter(c => c !== call)
-      rec.current = rec.busy.at(-1) ?? null
+      if (rec) {
+        rec.busy = rec.busy.filter(c => c !== call)
+        rec.current = rec.busy.at(-1) ?? null
+      }
       $.ui.invalidate('ui.render')
     }
   })
@@ -257,14 +350,38 @@ export function registerAgents(on: On) {
     const age = (r: Rec) => elapsed((r.endTime ?? now) - r.startTime)
     const dot = (r: Rec, key: string, dim = false) => <Text key={key} color={HUE[kindOf(r)]} dimColor={dim}>⏺</Text>
 
+    // The turn's receipt: how long, the agents it started, its edits and failed calls, and the cost it added.
+    const turnCalls = callsIn('turn')
+    const receipt = (() => {
+      if (!turn) return ''
+      const t = turn
+      const agents = recs.filter(r => r.startTime >= t.start).length
+      const edits = turnCalls.filter(c => EDITS.has(c.tool) && c.state === 'ok').length
+      const errors = turnCalls.filter(c => c.state === 'failed').length
+      const added = t.cost0 !== null && w.cost !== null && w.cost >= t.cost0 ? w.cost - t.cost0 : null
+      return [
+        `turn ${t.end === null ? '✶ ' : ''}${elapsed((t.end ?? now) - t.start)}`,
+        agents ? `${agents} agent${agents === 1 ? '' : 's'}` : '',
+        edits ? `${edits} edit${edits === 1 ? '' : 's'}` : '',
+        errors ? `${errors} error${errors === 1 ? '' : 's'}` : '',
+        added !== null && t.end !== null ? `+${fmtUsd(added)}` : '',
+      ].filter(Boolean).join(' · ')
+    })()
     const header = (left: RenderChildren) => (
-      <Box key="header" flexDirection="row" alignItems="center" marginBottom={compact ? 0 : 1}>
-        {left}
-        {compact ? null : <Box flexGrow={1} />}
-        <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done</Text>
-        {compact ? <Box flexGrow={1} /> : null}
+      <Box key="header" flexDirection="column" marginBottom={compact ? 0 : 1}>
+        <Box key="top" flexDirection="row" alignItems="center">
+          {left}
+          {compact ? null : <Box flexGrow={1} />}
+          <Text key="counts" mono dimColor>{compact ? '  ' : ''}{running} running{idle ? ` · ${idle} idle` : ''} · {done} done</Text>
+          {compact && turnCalls.length ? <Text key="calls" mono dimColor> · {turnCalls.length} call{turnCalls.length === 1 ? '' : 's'}</Text> : null}
+          {compact && turnCalls.some(c => c.state === 'failed') ? <Text key="failed" mono color="error"> {turnCalls.filter(c => c.state === 'failed').length} ✗</Text> : null}
+          {compact ? <Box flexGrow={1} /> : null}
+        </Box>
+        {receipt && !compact ? <Text key="receipt" mono dimColor wrap="truncate-end">  {receipt}</Text> : null}
       </Box>
     )
+    const stepsOf = (r: Rec) => steps.get(r.id) ?? 0
+    const stepText = (r: Rec) => (stepsOf(r) ? `${stepsOf(r)} step${stepsOf(r) === 1 ? '' : 's'}` : '')
     const go = (detail: string | null) => () => { void update($, view, s => ({ ...s, detail, armed: null })) }
 
     // ---- Detail: one agent. ----
@@ -274,7 +391,11 @@ export function registerAgents(on: On) {
       const parent = one.parentId ? byId.get(one.parentId) : undefined
       const ended = isEnded(one)
       const state = kind === 'running' ? '✶ Running…' : kind === 'waiting' ? '◐ Waiting' : kind === 'failed' ? `✗ ${one.status === 'killed' || one.taskStatus === 'killed' ? 'Stopped' : 'Failed'}` : '✓ Done'
-      const facts = [one.model, one.tokens > 0 ? `${short(one.tokens)} tokens` : '', `parent: ${parent ? parent.name : 'main'}`].filter(Boolean).join(' · ')
+      const facts = [one.model, one.tokens > 0 ? `${short(one.tokens)} tokens` : '', stepText(one), `parent: ${parent ? parent.name : 'main'}`].filter(Boolean).join(' · ')
+      // This agent's calls by tool, most used first.
+      const mine = tallyCalls(log.filter(c => c.agentId === one.id))
+      const tally = mine.map(t => `${t.group} ${t.n}`).join(' · ')
+      const failedMine = mine.reduce((n, t) => n + t.failed, 0)
       const armed = v.armed === one.id
       const calls = one.calls.slice(compact ? -COMPACT_CALLS : -CALLS_SHOWN)
       return (
@@ -299,7 +420,11 @@ export function registerAgents(on: On) {
           ) : null}
           {calls.length ? (
             <Box key="calls" flexDirection="column" marginTop={compact ? 0 : 1}>
-              {compact ? null : <Text mono dimColor>Recent calls</Text>}
+              {compact ? null : (
+                <Text key="calls-title" mono dimColor wrap="truncate-end">
+                  Recent calls{tally ? `  ${tally}` : ''}{failedMine ? <Text color="error"> · {failedMine} ✗</Text> : null}
+                </Text>
+              )}
               {calls.map(c => <Text key={`c-${c.id}`} mono dimColor={one.current?.id !== c.id} wrap="truncate-end">⎿  {c.text}</Text>)}
             </Box>
           ) : null}
@@ -402,7 +527,7 @@ export function registerAgents(on: On) {
         </Button>,
       )
       const detail = r.current ? r.current.text : ended ? '' : r.label
-      const extra = [r.model, r.tokens > 0 ? `${short(r.tokens)} tokens` : ''].filter(Boolean).join(' · ')
+      const extra = [r.model, r.tokens > 0 ? `${short(r.tokens)} tokens` : '', stepText(r)].filter(Boolean).join(' · ')
       if (detail || (extra && !dim)) {
         rows.push(
           <Text key={`sub:${r.id}`} mono dimColor wrap="truncate-end">{pad}  ⎿  {detail}{detail && extra ? '  · ' : ''}{dim ? '' : extra}</Text>,
@@ -417,6 +542,77 @@ export function registerAgents(on: On) {
       for (const r of finished) draw(r, 0, true)
     }
 
+    // ---- Loops: model loops with no card, compactions and loops whose requests came from no listed agent (forks). ----
+    const forks = [...steps.keys()].filter(id => !byId.has(id)).length
+    if (compactions || forks) {
+      const what = [compactions ? `compaction ⟲${compactions > 1 ? ` ×${compactions}` : ''}` : '', forks ? `fork${forks > 1 ? ` ×${forks}` : ''}` : ''].filter(Boolean).join(' · ')
+      rows.push(<Text key="loops" mono dimColor wrap="truncate-end">Loops ({compactions + forks})  {what}</Text>)
+    }
+
+    // ---- Calls: one row a tool, this turn's or the session's, a bar to the most used; a row opens on its last calls. ----
+    const scope = v.callsScope ?? 'turn'
+    const scoped = callsIn(scope)
+    const calls: RenderChildren[] = []
+    if (log.length) {
+      const tools = tallyCalls(scoped)
+      const failed = scoped.filter(c => c.state === 'failed').length
+      const busy = scoped.filter(c => c.state === 'running').length
+      const right = ` ${scope} · ${scoped.length}${failed ? ` · ${failed} ✗` : ''}`
+      calls.push(
+        <Box key="calls-head" flexDirection="row">
+          <Text key="l" mono dimColor>── calls {'─'.repeat(Math.max(0, columns - 9 - right.length - 3))} </Text>
+          <Button key="scope" plain hotkey="t" onPress={() => { void update($, view, s => ({ ...s, callsScope: (s.callsScope ?? 'turn') === 'turn' ? 'session' as const : 'turn' as const, openTool: null })) }}>
+            <Text mono dimColor>{scope}</Text>
+          </Button>
+          <Text key="n" mono dimColor> · {scoped.length}</Text>
+          {failed ? <Text key="f" mono color="error"> · {failed} ✗</Text> : null}
+        </Box>,
+      )
+      const most = Math.max(1, ...tools.map(t => t.n))
+      const label = Math.max(6, Math.min(10, ...tools.map(t => t.group.length + 1)))
+      const bar = Math.max(4, Math.min(24, columns - label - 26))
+      for (const t of tools.slice(0, TOOL_ROWS)) {
+        const open = v.openTool === t.group
+        const len = Math.max(1, Math.round((t.n / most) * bar))
+        const subs = t.subs.length ? clip(t.subs.join(', '), Math.max(0, columns - label - bar - 14 - (t.failed ? 5 : 0))) : ''
+        calls.push(
+          <Button key={`tool:${t.group}`} plain onPress={() => { void update($, view, s => ({ ...s, openTool: s.openTool === t.group ? null : t.group })) }}>
+            <Text mono dimColor>{open ? '▾' : ' '} </Text>
+            <Text mono wrap="truncate-end">{clip(t.group, label - 1).padEnd(label)}</Text>
+            <Text mono color="success">{'━'.repeat(len)}</Text>
+            <Text mono dimColor>{' '.repeat(bar - len)} {String(t.n).padStart(4)}</Text>
+            {t.failed ? <Text mono color="error">  {t.failed} ✗</Text> : null}
+            {t.running ? <Text mono color="claude">  ⧗{t.running}</Text> : null}
+            {subs ? <Text mono dimColor wrap="truncate-end">  {subs}</Text> : null}
+          </Button>,
+        )
+        if (open) {
+          for (const c of scoped.filter(c => c.group === t.group).slice(-OPEN_CALLS)) {
+            const who = c.agentId ? clip(byId.get(c.agentId)?.name ?? 'agent', 16) : 'main'
+            const mark = c.state === 'failed' ? ' ✗' : c.state === 'running' ? ' ⧗' : ''
+            const text = clip(c.text, Math.max(8, columns - 8 - who.length - mark.length))
+            calls.push(
+              <Box key={`open:${c.id}`} flexDirection="row">
+                <Text mono dimColor wrap="truncate-end">   ⎿ {text}</Text>
+                <Box flexGrow={1} />
+                {mark ? <Text mono color={c.state === 'failed' ? 'error' : 'claude'}>{mark}</Text> : null}
+                <Text mono dimColor> {who}</Text>
+              </Box>,
+            )
+          }
+        }
+      }
+      if (tools.length > TOOL_ROWS) calls.push(<Text key="tools-more" mono dimColor>  +{tools.length - TOOL_ROWS} more tools</Text>)
+      if (!scoped.length) calls.push(<Text key="calls-none" mono dimColor>  No calls this turn yet</Text>)
+      else {
+        calls.push(
+          <Text key="calls-foot" mono dimColor>
+            {'  '}✓ {scoped.length - failed - busy} ok{failed ? <Text color="error"> · ✗ {failed} failed</Text> : null}{busy ? ` · ⧗ ${busy} running` : ''}
+          </Text>,
+        )
+      }
+    }
+
     // ---- Timeline: one lane per agent, from its start to its end (or now), over the window all of them span. ----
     const lanes: RenderChildren[] = []
     if (recs.length) {
@@ -425,21 +621,53 @@ export function registerAgents(on: On) {
       const span = Math.max(to - from, MINUTE / 6)
       const cells = Math.max(8, Math.min(30, columns - 34))
       const label = Math.max(10, Math.min(20, columns - cells - 14))
+      const cellOf = (t: number) => Math.min(cells - 1, Math.max(0, Math.floor(((t - from) / span) * cells)))
+      // Skill calls are ◆ marks on the lane of the agent that made them; the main loop's on a lane of its own.
+      const skills = log.filter(c => c.group === 'skill' && c.at >= from)
+      const marksOf = (agentId: string | undefined) => new Set(skills.filter(c => c.agentId === agentId).map(c => cellOf(c.at)))
+      // A lane's cells, cut where the colour changes: the dotted wait, the bar, the dotted rest, and the marks over them.
+      const cellsOfLane = (a: number, b: number, marks: Set<number>, hue: string) => {
+        const out: RenderChildren[] = []
+        let run = ''
+        let runHue: string | null = null
+        const flush = (k: number) => {
+          if (run) out.push(<Text key={`c${k}`} mono color={runHue ?? undefined} dimColor={runHue === null}>{run}</Text>)
+          run = ''
+        }
+        for (let i = 0; i < cells; i++) {
+          const mark = marks.has(i)
+          const lit = i >= a && i < b
+          const h = mark ? 'claude' : lit ? hue : null
+          if (h !== runHue) { flush(i); runHue = h }
+          run += mark ? '◆' : lit ? '━' : '·'
+        }
+        flush(cells)
+        return out
+      }
+      const mainMarks = marksOf(undefined)
+      if (mainMarks.size) {
+        lanes.push(
+          <Box key="lane:main" flexDirection="row">
+            <Text key="d" mono dimColor>◇</Text>
+            <Text key="l" mono dimColor> {'main'.padEnd(label)} </Text>
+            {cellsOfLane(0, 0, mainMarks, 'claude')}
+          </Box>,
+        )
+      }
       for (const r of [...recs].sort((a, b) => a.startTime - b.startTime)) {
-        const a = Math.min(cells - 1, Math.max(0, Math.floor(((r.startTime - from) / span) * cells)))
+        const a = cellOf(r.startTime)
         const b = Math.min(cells, Math.max(a + 1, Math.ceil((((r.endTime ?? now) - from) / span) * cells)))
-        const kind = kindOf(r)
         lanes.push(
           <Box key={`lane:${r.id}`} flexDirection="row">
             {dot(r, 'd')}
             <Text key="l" mono> {clip(`${r.type}(${r.name})`, label).padEnd(label)} </Text>
-            <Text key="p" mono dimColor>{'·'.repeat(a)}</Text>
-            <Text key="b" mono color={HUE[kind]}>{'━'.repeat(b - a)}</Text>
-            <Text key="s" mono dimColor>{'·'.repeat(Math.max(0, cells - b))}</Text>
+            {cellsOfLane(a, b, marksOf(r.id), HUE[kindOf(r)])}
             <Text key="t" mono dimColor> {age(r)}</Text>
           </Box>,
         )
       }
+      const named = [...new Set(skills.map(c => c.sub).filter(Boolean))]
+      if (named.length) lanes.push(<Text key="lane:legend" mono dimColor wrap="truncate-end">{' '.repeat(label + 3)}<Text color="claude">◆</Text> skill · {named.join(', ')}</Text>)
     }
 
     return (
@@ -447,6 +675,7 @@ export function registerAgents(on: On) {
         {header(<Text key="title" mono bold color="claude">✻ Agents</Text>)}
         {recs.length === 0 ? <Text key="none" mono dimColor>No agents yet</Text> : null}
         {rows}
+        {calls.length ? <Box key="calls" flexDirection="column" marginTop={1}>{calls}</Box> : null}
         {lanes.length ? <Text key="tl-head" mono dimColor>── timeline {'─'.repeat(Math.max(0, columns - 12))}</Text> : null}
         {lanes}
       </Box>
